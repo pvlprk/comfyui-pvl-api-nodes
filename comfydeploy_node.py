@@ -80,7 +80,7 @@ class ComfyDeployNode:
         if not run_id:
             raise Exception("ComfyDeploy did not return a valid run ID.")
 
-        max_wait = 180
+        max_wait = 240
         interval = 5
         waited = 0
 
