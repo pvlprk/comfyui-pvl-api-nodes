@@ -122,14 +122,27 @@ class ComfyDeployNode:
         # Download image and convert to tensor
         img_tensor = None
         try:
+            # Download image
             img_response = requests.get(image_url)
             img_response.raise_for_status()
-            img = Image.open(BytesIO(img_response.content)).convert("RGB")
+            
+            # Open image and preserve alpha if it exists
+            img = Image.open(BytesIO(img_response.content))
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGBA")
+            else:
+                img = img.convert("RGB")
+            
+            # Convert to NumPy array and normalize
             np_img = np.array(img).astype(np.float32) / 255.0
+            
+            # Convert to PyTorch tensor
+            # Shape will be [1, H, W, C] with C = 3 or 4 depending on the image
             img_tensor = torch.from_numpy(np_img).unsqueeze(0)
+
         except Exception as e:
             raise RuntimeError(f"Failed to download or convert image: {e}")
-
+            
         # Download text
         text_content = ""
         if text_url:
