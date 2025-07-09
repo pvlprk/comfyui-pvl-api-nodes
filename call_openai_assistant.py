@@ -66,7 +66,6 @@ class CallAssistantNode:
         return file.id
 
     def call_assistant(self, api_key, assistant_id, seed, model, input_text="", image=None):
-        # Normalize inputs
         input_text = self.undefined_to_none(input_text) or ""
         image = self.undefined_to_none(image)
 
@@ -84,8 +83,7 @@ class CallAssistantNode:
                 openai.beta.threads.messages.create(
                     thread_id=thread.id,
                     role="user",
-                    content=input_text.strip(),
-                    metadata={"seed": str(seed), "model": model}
+                    content=input_text.strip()
                 )
                 messages_created = True
             except Exception as e:
@@ -113,7 +111,8 @@ class CallAssistantNode:
             run = openai.beta.threads.runs.create(
                 thread_id=thread.id,
                 assistant_id=assistant_id,
-                model=model
+                model=model,
+                seed=seed
             )
         except Exception as e:
             return (f"Failed to create assistant run: {e}",)
