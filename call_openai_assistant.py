@@ -10,18 +10,22 @@ class CallAssistantNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": ("STRING", {"multiline": False}),
-                "assistant_id": ("STRING", {"multiline": False}),
-                "input_text": ("STRING", {"multiline": True}),
-                "seed": ("INT", {"default": 42, "min": 0, "max": 999999}),
-                "model": (cls.get_model_list(),),
+                "api_key": ("STRING", {"multiline": False, "tooltip": "Your OpenAI API key"}),
+                "assistant_id": ("STRING", {"multiline": False, "tooltip": "ID of the OpenAI Assistant to call"}),
+                "seed": ("INT", {
+                    "default": 42, "min": 0, "max": 999999,
+                    "step": 1, "display": "number", "tooltip": "Seed for reproducibility"
+                }),
+                "model": (cls.get_model_list(), {"default": "gpt-4", "tooltip": "OpenAI model to use"}),
             },
             "optional": {
-                "image": ("IMAGE",),
+                "input_text": ("STRING", {"default": "", "multiline": True, "forceInput": True, "tooltip": "Prompt text to send to the assistant"}),
+                "image": ("IMAGE", {"default": None, "forceInput": True, "tooltip": "Optional image to include in the request"}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("assistant_response",)
     FUNCTION = "call_assistant"
     CATEGORY = "OpenAI"
 
@@ -35,13 +39,14 @@ class CallAssistantNode:
             print(f"Failed to fetch model list: {e}")
             return ("gpt-4", "gpt-4o", "gpt-3.5-turbo")
 
+    @staticmethod
+    def undefined_to_none(value):
+        return None if value in (None, "undefined") else value
+
     def upload_image(self, api_key, image_tensor):
         openai.api_key = api_key
-
-        # Convert tensor to numpy and normalize to 0–255 range
         image_np = image_tensor.squeeze().clamp(0, 1).mul(255).byte().numpy()
 
-        # Determine image mode
         if image_np.ndim == 2:
             mode = "L"
         elif image_np.shape[-1] == 1:
@@ -52,36 +57,39 @@ class CallAssistantNode:
         else:
             mode = "RGB"
 
-        # Convert to PIL
         image_pil = Image.fromarray(image_np, mode=mode)
-
-        # Save to buffer as PNG
         buffer = BytesIO()
         image_pil.save(buffer, format="PNG")
         buffer.seek(0)
 
-        # Pass a tuple: (filename, file buffer)
-        file = openai.files.create(
-            file=("image.png", buffer),
-            purpose="vision"
-        )
+        file = openai.files.create(file=("image.png", buffer), purpose="vision")
         return file.id
 
+    def call_assistant(self, api_key, assistant_id, seed, model, input_text="", image=None):
+        # Normalize inputs
+        input_text = self.undefined_to_none(input_text) or ""
+        image = self.undefined_to_none(image)
 
-    def call_assistant(self, api_key, assistant_id, input_text, seed, model, image=None):
         openai.api_key = api_key
-        thread = openai.beta.threads.create()
 
-        if not input_text.strip() and image is None:
-            return ("Error: Both text and image inputs are empty.",)
+        try:
+            thread = openai.beta.threads.create()
+        except Exception as e:
+            return (f"Failed to create thread: {e}",)
+
+        messages_created = False
 
         if input_text.strip():
-            openai.beta.threads.messages.create(
-                thread_id=thread.id,
-                role="user",
-                content=input_text.strip(),
-                metadata={"seed": str(seed), "model": model}
-            )
+            try:
+                openai.beta.threads.messages.create(
+                    thread_id=thread.id,
+                    role="user",
+                    content=input_text.strip(),
+                    metadata={"seed": str(seed), "model": model}
+                )
+                messages_created = True
+            except Exception as e:
+                return (f"Failed to send text message: {e}",)
 
         if image is not None:
             try:
@@ -94,14 +102,21 @@ class CallAssistantNode:
                         "image_file": {"file_id": file_id}
                     }]
                 )
+                messages_created = True
             except Exception as e:
                 return (f"Image upload failed: {e}",)
 
-        run = openai.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=assistant_id,
-            model=model
-        )
+        if not messages_created:
+            return ("Error: No message content was sent (text and image both missing or failed).",)
+
+        try:
+            run = openai.beta.threads.runs.create(
+                thread_id=thread.id,
+                assistant_id=assistant_id,
+                model=model
+            )
+        except Exception as e:
+            return (f"Failed to create assistant run: {e}",)
 
         while True:
             run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
