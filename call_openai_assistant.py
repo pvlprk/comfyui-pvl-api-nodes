@@ -16,7 +16,11 @@ class CallAssistantNode:
                     "default": 42, "min": 0, "max": 999999,
                     "step": 1, "display": "number", "tooltip": "Seed for reproducibility"
                 }),
-                "model": (cls.get_model_list(), {"default": "gpt-4", "tooltip": "OpenAI model to use"}),
+                "model": ("STRING", {
+                    "default": "gpt-4",
+                    "multiline": False,
+                    "tooltip": "Model name (e.g., gpt-4, gpt-4o, gpt-3.5-turbo). You can also connect a string input."
+                }),
             },
             "optional": {
                 "input_text": ("STRING", {"default": "", "multiline": True, "forceInput": True, "tooltip": "Prompt text to send to the assistant"}),
@@ -28,16 +32,6 @@ class CallAssistantNode:
     RETURN_NAMES = ("assistant_response",)
     FUNCTION = "call_assistant"
     CATEGORY = "OpenAI"
-
-    @staticmethod
-    def get_model_list():
-        try:
-            models = openai.models.list()
-            model_ids = [m.id for m in models.data if m.id.startswith("gpt")]
-            return tuple(sorted(set(model_ids)))
-        except Exception as e:
-            print(f"Failed to fetch model list: {e}")
-            return ("gpt-4", "gpt-4o", "gpt-3.5-turbo")
 
     @staticmethod
     def undefined_to_none(value):
