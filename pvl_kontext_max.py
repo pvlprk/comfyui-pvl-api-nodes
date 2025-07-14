@@ -126,8 +126,8 @@ def handle_bfl_synchronous_operation(
     )
 
 
-class FluxProImageNodeSilent(ComfyNodeABC):
-    """Flux.1 Pro Node with optional fallback image output in case of error/moderation."""
+class PvlKontextMax(ComfyNodeABC):
+    """Flux.1 Kontext [max] node with optional fallback image output."""
 
     @classmethod
     def INPUT_TYPES(s):
@@ -211,7 +211,7 @@ class FluxProImageNodeSilent(ComfyNodeABC):
 
         operation = SynchronousOperation(
             endpoint=ApiEndpoint(
-                path="/proxy/bfl/flux-pro-1.1/generate",
+                path="/proxy/bfl/flux-kontext-max/generate",
                 method=HttpMethod.POST,
                 request_model=BFLFluxProGenerateRequest,
                 response_model=BFLFluxProGenerateResponse,
@@ -236,9 +236,9 @@ class FluxProImageNodeSilent(ComfyNodeABC):
 
 
 NODE_CLASS_MAPPINGS = {
-    "FluxProImageNodeSilent": FluxProImageNodeSilent,
+    "PvlKontextMax": PvlKontextMax,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FluxProImageNodeSilent": "Flux.1 Pro Image (Silent)",
+    "PvlKontextMax": "Flux.1 Kontext [max] (Silent)",
 }
