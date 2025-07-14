@@ -1,6 +1,6 @@
 from .pvl_call_openai_assistant import CallAssistantNode
 from .pvl_comfydeploy_node import ComfyDeployNode
-from .pvl_kontexrt_max import PvlKontextMax
+from .pvl_kontext_max import PvlKontextMax
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
