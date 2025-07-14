@@ -11,7 +11,7 @@ from typing import Union, Optional
 from comfy.comfy_types.node_typing import IO, ComfyNodeABC
 from comfy_api_nodes.apis.bfl_api import (
     BFLStatus,
-    BFLFluxProGenerateRequest,
+    BFLFluxKontextProGenerateRequest,
     BFLFluxProGenerateResponse,
 )
 from comfy_api_nodes.apis.client import (
@@ -25,7 +25,6 @@ from comfy_api_nodes.apinode_utils import (
 )
 from server import PromptServer
 
-
 def convert_image_to_base64(image: torch.Tensor):
     scaled_image = downscale_image_tensor(image, total_pixels=2048 * 2048)
     if len(scaled_image.shape) > 3:
@@ -36,6 +35,22 @@ def convert_image_to_base64(image: torch.Tensor):
     img.save(img_byte_arr, format="PNG")
     return base64.b64encode(img_byte_arr.getvalue()).decode()
 
+def validate_aspect_ratio(ratio_string, minimum_ratio=1/4, maximum_ratio=4/1,
+                          minimum_ratio_str="1:4", maximum_ratio_str="4:1"):
+    try:
+        width, height = map(int, ratio_string.split(":"))
+        ratio = width / height
+        if not (minimum_ratio <= ratio <= maximum_ratio):
+            raise ValueError
+        return ratio_string
+    except Exception:
+        raise ValueError(
+            f"Aspect ratio must be in format 'width:height' between {minimum_ratio_str} and {maximum_ratio_str}."
+        )
+
+def validate_string(value: str, strip_whitespace=True):
+    if not isinstance(value, str) or (strip_whitespace and not value.strip()):
+        raise ValueError("Prompt must be a non-empty string.")
 
 def _poll_until_generated(polling_url: str, timeout=360, node_id: Union[str, None] = None, fallback_image=None):
     start_time = time.time()
@@ -113,7 +128,6 @@ def _poll_until_generated(polling_url: str, timeout=360, node_id: Union[str, Non
             print(f"[FluxNode Warning] Unexpected status: {response.status_code}")
             return fallback_image
 
-
 def handle_bfl_synchronous_operation(
     operation: SynchronousOperation,
     timeout_bfl_calls=360,
@@ -125,9 +139,13 @@ def handle_bfl_synchronous_operation(
         response_api.polling_url, timeout=timeout_bfl_calls, node_id=node_id, fallback_image=fallback_image
     )
 
-
 class PvlKontextMax(ComfyNodeABC):
     """Flux.1 Kontext [max] node with optional fallback image output."""
+
+    MINIMUM_RATIO = 1 / 4
+    MAXIMUM_RATIO = 4 / 1
+    MINIMUM_RATIO_STR = "1:4"
+    MAXIMUM_RATIO_STR = "4:1"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -141,44 +159,52 @@ class PvlKontextMax(ComfyNodeABC):
                         "tooltip": "Prompt for the image generation",
                     },
                 ),
-                "prompt_upsampling": (
-                    IO.BOOLEAN,
+                "aspect_ratio": (
+                    IO.STRING,
                     {
-                        "default": False,
-                        "tooltip": "Creative modifier (nondeterministic)",
+                        "default": "16:9",
+                        "tooltip": "Aspect ratio in format 'W:H' (e.g., 16:9).",
                     },
                 ),
-                "width": (
-                    IO.INT,
+                "guidance": (
+                    IO.FLOAT,
                     {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 1440,
-                        "step": 32,
+                        "default": 3.0,
+                        "min": 0.1,
+                        "max": 99.0,
+                        "step": 0.1,
+                        "tooltip": "Guidance strength for image generation",
                     },
                 ),
-                "height": (
+                "steps": (
                     IO.INT,
                     {
-                        "default": 768,
-                        "min": 256,
-                        "max": 1440,
-                        "step": 32,
+                        "default": 50,
+                        "min": 1,
+                        "max": 150,
+                        "tooltip": "Number of denoising steps",
                     },
                 ),
                 "seed": (
                     IO.INT,
                     {
-                        "default": 0,
+                        "default": 1234,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "control_after_generate": True,
-                        "tooltip": "Random seed used for noise.",
+                        "tooltip": "Random seed for generation",
+                    },
+                ),
+                "prompt_upsampling": (
+                    IO.BOOLEAN,
+                    {
+                        "default": False,
+                        "tooltip": "Enable prompt upsampling (creative mode)",
                     },
                 ),
             },
             "optional": {
-                "image_prompt": (IO.IMAGE,),
+                "input_image": (IO.IMAGE,),
                 "fallback_image": (IO.IMAGE,),
             },
             "hidden": {
@@ -197,43 +223,50 @@ class PvlKontextMax(ComfyNodeABC):
     def api_call(
         self,
         prompt: str,
-        prompt_upsampling,
-        width: int,
-        height: int,
+        aspect_ratio: str,
+        guidance: float,
+        steps: int,
+        input_image: Optional[torch.Tensor] = None,
         seed=0,
-        image_prompt=None,
+        prompt_upsampling=False,
         fallback_image=None,
         unique_id: Union[str, None] = None,
         **kwargs,
     ):
-        if image_prompt is not None:
-            image_prompt = convert_image_to_base64(image_prompt)
+        aspect_ratio = validate_aspect_ratio(
+            aspect_ratio,
+            minimum_ratio=self.MINIMUM_RATIO,
+            maximum_ratio=self.MAXIMUM_RATIO,
+            minimum_ratio_str=self.MINIMUM_RATIO_STR,
+            maximum_ratio_str=self.MAXIMUM_RATIO_STR,
+        )
+        if input_image is None:
+            validate_string(prompt, strip_whitespace=False)
 
         operation = SynchronousOperation(
             endpoint=ApiEndpoint(
                 path="/proxy/bfl/flux-kontext-max/generate",
                 method=HttpMethod.POST,
-                request_model=BFLFluxProGenerateRequest,
+                request_model=BFLFluxKontextProGenerateRequest,
                 response_model=BFLFluxProGenerateResponse,
             ),
-            request=BFLFluxProGenerateRequest(
+            request=BFLFluxKontextProGenerateRequest(
                 prompt=prompt,
                 prompt_upsampling=prompt_upsampling,
-                width=width,
-                height=height,
+                guidance=round(guidance, 1),
+                steps=steps,
                 seed=seed,
-                image_prompt=image_prompt,
+                aspect_ratio=aspect_ratio,
+                input_image=(
+                    input_image if input_image is None else convert_image_to_base64(input_image)
+                ),
             ),
             auth_kwargs=kwargs,
         )
-
         output_image = handle_bfl_synchronous_operation(
-            operation,
-            node_id=unique_id,
-            fallback_image=fallback_image
+            operation, node_id=unique_id, fallback_image=fallback_image
         )
         return (output_image,)
-
 
 NODE_CLASS_MAPPINGS = {
     "PvlKontextMax": PvlKontextMax,
