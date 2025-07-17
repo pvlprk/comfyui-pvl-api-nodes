@@ -21,6 +21,10 @@ class CallAssistantNode:
                     "multiline": False,
                     "tooltip": "Model name (e.g., gpt-4, gpt-4o, gpt-3.5-turbo). You can also connect a string input."
                 }),
+                "reasoning_effort": (["disabled", "low", "medium", "high"], {
+                    "default": "disabled",
+                    "tooltip": "Optional reasoning effort to influence response depth"
+                }),
             },
             "optional": {
                 "input_text": ("STRING", {"default": "", "multiline": True, "forceInput": True, "tooltip": "Prompt text to send to the assistant"}),
@@ -59,8 +63,7 @@ class CallAssistantNode:
         file = openai.files.create(file=("image.png", buffer), purpose="vision")
         return file.id
 
-    def call_assistant(self, api_key, assistant_id, seed, model, input_text="", image=None):
-        # Normalize inputs
+    def call_assistant(self, api_key, assistant_id, seed, model, reasoning_effort="disabled", input_text="", image=None):
         input_text = self.undefined_to_none(input_text) or ""
         image = self.undefined_to_none(image)
 
@@ -104,11 +107,19 @@ class CallAssistantNode:
             return ("Error: No message content was sent (text and image both missing or failed).",)
 
         try:
-            run = openai.beta.threads.runs.create(
-                thread_id=thread.id,
-                assistant_id=assistant_id,
-                model=model
-            )
+            run_args = {
+                "thread_id": thread.id,
+                "assistant_id": assistant_id,
+                "model": model,
+            }
+
+            if reasoning_effort != "disabled":
+                run_args["reasoning_effort"] = reasoning_effort
+
+            run = openai.beta.threads.runs.create(**run_args)
+        except Exception as e:
+            return (f"Failed to create assistant run: {e}",)
+            run = openai.beta.threads.runs.create(**run_args)
         except Exception as e:
             return (f"Failed to create assistant run: {e}",)
 
