@@ -33,7 +33,7 @@ class PVL_fal_KontextDevInpaint_API:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "inpaint"
-    CATEGORY = "Pavel/FalAI"
+    CATEGORY = "PVL_tools_FAL"
 
     def inpaint(self, image, mask, prompt, steps, CFG, strength, num_images, 
                 enable_safety_checker, output_format, sync_mode, acceleration,
