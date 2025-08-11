@@ -1,5 +1,7 @@
 import os
 import torch
+import numpy as np
+import json
 from .fal_utils import FalConfig, ImageUtils, ResultProcessor, ApiHandler
 
 class PVL_fal_KontextMaxSingle_API:
@@ -21,7 +23,7 @@ class PVL_fal_KontextMaxSingle_API:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "edit_image"
-    CATEGORY = "Pavel/FalAI"
+    CATEGORY = "PVL_tools_FAL"
 
     def edit_image(self, prompt, image, seed, CFG, num_images, output_format, 
                   sync_mode, safety_tolerance, aspect_ratio):
@@ -50,9 +52,70 @@ class PVL_fal_KontextMaxSingle_API:
             # Submit the request and get the result
             result = ApiHandler.submit_and_get_result("fal-ai/flux-pro/kontext/max", arguments)
             
-            # Process the result and return the image tensor
-            return ResultProcessor.process_image_result(result)
+            # Log the full result for debugging (comment out in production)
+            print("API Response:", json.dumps(result, indent=2, default=str))
+            
+            # Check for NSFW indicators in the response
+            if self._is_nsfw_response(result):
+                print("NSFW content detected in API response - returning empty output")
+                return tuple()
+            
+            # Process the result and get the image tensor
+            processed_result = ResultProcessor.process_image_result(result)
+            
+            # Check if the result is a black image (likely NSFW)
+            if processed_result and len(processed_result) > 0:
+                img_tensor = processed_result[0]
+                # Check if image is entirely black (NSFW content)
+                if torch.all(img_tensor == 0):
+                    print("NSFW content detected (black image) - returning empty output")
+                    return tuple()
+                
+            return processed_result
             
         except Exception as e:
-            print(f"Error editing image with FLUX Kontext Max: {str(e)}")
-            return ApiHandler.handle_image_generation_error("FLUX Kontext Max", e)
+            # Print error to console
+            print(f"Error in FLUX Kontext Max: {str(e)}")
+            
+            # Return empty tuple to prevent output
+            return tuple()
+    
+    def _is_nsfw_response(self, result):
+        """
+        Check if the API response indicates NSFW content.
+        This method looks for common indicators in the response structure.
+        """
+        # Check if result is a dictionary
+        if not isinstance(result, dict):
+            return False
+            
+        # Check for common NSFW indicator fields
+        nsfw_indicators = [
+            'nsfw', 'is_nsfw', 'content_flag', 'safety_attributes', 
+            'content_filter', 'moderation', 'safety'
+        ]
+        
+        # Check top-level fields
+        for indicator in nsfw_indicators:
+            if indicator in result:
+                # If the field exists and is truthy, consider it NSFW
+                if result[indicator]:
+                    print(f"NSFW detected via '{indicator}' field: {result[indicator]}")
+                    return True
+        
+        # Check for NSFW flags in images
+        if 'images' in result and isinstance(result['images'], list):
+            for img in result['images']:
+                for indicator in nsfw_indicators:
+                    if indicator in img and img[indicator]:
+                        print(f"NSFW detected in image via '{indicator}' field: {img[indicator]}")
+                        return True
+        
+        # Check for error messages that might indicate NSFW filtering
+        if 'error' in result and isinstance(result['error'], dict):
+            error_msg = result['error'].get('message', '').lower()
+            if any(term in error_msg for term in ['nsfw', 'safety', 'filter', 'moderation']):
+                print(f"NSFW detected via error message: {error_msg}")
+                return True
+                
+        return False
