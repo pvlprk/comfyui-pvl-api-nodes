@@ -8,6 +8,7 @@ from .pvl_fal_flux_dev import PVL_fal_FluxDev_API
 from .pvl_fal_kontext_max_single import PVL_fal_KontextMaxSingle_API
 from .pvl_fal_kontext_dev_inpaint import PVL_fal_KontextDevInpaint_API
 from .pvl_fal_flux_general import PVL_fal_FluxGeneral_API
+from .pvl_switchTen import PVL_Switch_Huge
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -19,7 +20,8 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_FluxDev_API": PVL_fal_FluxDev_API,
     "PVL_fal_KontextMaxSingle_API": PVL_fal_KontextMaxSingle_API,
     "PVL_fal_KontextDevInpaint_API": PVL_fal_KontextDevInpaint_API, 
-    "PVL_fal_FluxGeneral_API": PVL_fal_FluxGeneral_API,    
+    "PVL_fal_FluxGeneral_API": PVL_fal_FluxGeneral_API,
+    "PVL_Switch_Huge": PVL_Switch_Huge
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -32,5 +34,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_FluxDev_API": "FLUX DEV (fal.ai)",
     "PVL_fal_KontextMaxSingle_API": "FLUX Kontext Max Single (fal.ai)",
     "PVL_fal_KontextDevInpaint_API": "FLUX Kontext Dev Inpaint (fal.ai)",
-    "PVL_fal_FluxGeneral_API": "FLUX General (fal.ai)",    
-}
+    "PVL_fal_FluxGeneral_API": "FLUX General (fal.ai)",
+    "PVL_Switch_Huge": "PVL Switch Huge"
+ }
