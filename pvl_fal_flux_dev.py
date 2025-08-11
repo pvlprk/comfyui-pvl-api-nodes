@@ -23,7 +23,7 @@ class PVL_fal_FluxDev_API:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "generate_image"
-    CATEGORY = "Pavel/FalAI"
+    CATEGORY = "PVL_tools_FAL"
 
     def generate_image(self, prompt, width, height, steps, CFG, seed, 
                       num_images, enable_safety_checker, output_format, sync_mode,
