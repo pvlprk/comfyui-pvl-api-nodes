@@ -33,7 +33,7 @@ class PVL_fal_KontextMaxMulti_API:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "generate_image"
-    CATEGORY = "FAL/Image"
+    CATEGORY = "PVL_tools_FAL"
 
     def generate_image(
         self,
