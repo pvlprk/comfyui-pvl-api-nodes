@@ -18,7 +18,7 @@ class IsConnected:
     RETURN_TYPES = ("BOOLEAN",)
     RETURN_NAMES = ("is_connected",)
     FUNCTION = "check"
-    CATEGORY = "logic"
+    CATEGORY = "PVL_tools"
 
     def check(self, value=None):
         return (value is not None,)
