@@ -17,7 +17,7 @@ NODE_CLASS_MAPPINGS = {
     "PVLCheckIfConnected": IsConnected,
     "PVL_fal_KontextMaxMulti_API": PVL_fal_KontextMaxMulti_API,
     "PVL_fal_FluxWithLora_API": PVL_fal_FluxWithLora_API,
-    "PVL_fal_FluxDev_API": PVL_fal_FluxDev_API,
+    "PVL_fal_FluxDev_API": PVL_fal_FluxDev_API, 
     "PVL_fal_KontextMaxSingle_API": PVL_fal_KontextMaxSingle_API,
     "PVL_fal_KontextDevInpaint_API": PVL_fal_KontextDevInpaint_API, 
     "PVL_fal_FluxGeneral_API": PVL_fal_FluxGeneral_API,
@@ -27,13 +27,13 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL Call OpenAI Assistant": "PVL Call OpenAI Assistant",
     "PVL ComfyDeploy API Caller": "PVL ComfyDeploy API Caller",
-    "PVL KONTEXT MAX": "PVL KONTEXT MAX",
+    "PVL KONTEXT MAX": "PVL KONTEXT MAX (comfyui.org)",
     "PVLCheckIfConnected": "PVL Check If Connected",
     "PVL_fal_KontextMaxMulti_API": "PVL KONTEXT MAX MULTI (fal.ai)",
     "PVL_fal_FluxWithLora_API": "PVL FLUX DEV LORA (fal.ai)",
-    "PVL_fal_FluxDev_API": "FLUX DEV (fal.ai)",
-    "PVL_fal_KontextMaxSingle_API": "FLUX Kontext Max Single (fal.ai)",
-    "PVL_fal_KontextDevInpaint_API": "FLUX Kontext Dev Inpaint (fal.ai)",
-    "PVL_fal_FluxGeneral_API": "FLUX General (fal.ai)",
+    "PVL_fal_FluxDev_API": "PVL FLUX DEV (fal.ai)",
+    "PVL_fal_KontextMaxSingle_API": "PVL Kontext Max Single (fal.ai)",
+    "PVL_fal_KontextDevInpaint_API": "PVL Kontext Dev Inpaint (fal.ai)",
+    "PVL_fal_FluxGeneral_API": "PVL FLUX General (fal.ai)",
     "PVL_Switch_Huge": "PVL Switch Huge"
  }
