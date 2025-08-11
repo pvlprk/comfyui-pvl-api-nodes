@@ -70,7 +70,7 @@ class CallAssistantNode:
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("assistant_response",)
-    FUNCTION = "call_GPT_assistant"
+    FUNCTION = "call_assistant"
     CATEGORY = "PVL_tools"
 
     @staticmethod

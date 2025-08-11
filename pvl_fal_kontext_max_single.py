@@ -1,3 +1,4 @@
+
 import os
 import torch
 import numpy as np
@@ -25,97 +26,59 @@ class PVL_fal_KontextMaxSingle_API:
     FUNCTION = "edit_image"
     CATEGORY = "PVL_tools_FAL"
 
+    def _raise(self, msg):
+        # Helper to standardize raising: ComfyUI will stop the workflow
+        raise RuntimeError(msg)
+
     def edit_image(self, prompt, image, seed, CFG, num_images, output_format, 
                   sync_mode, safety_tolerance, aspect_ratio):
-        try:
-            # Upload the input image to get a URL
-            image_url = ImageUtils.upload_image(image)
-            if not image_url:
-                raise Exception("Failed to upload image")
-            
-            # Prepare the arguments for the API call
-            arguments = {
-                "prompt": prompt,
-                "image_url": image_url,
-                "guidance_scale": CFG,  # Using the renamed parameter
-                "num_images": num_images,
-                "output_format": output_format,
-                "sync_mode": sync_mode,
-                "safety_tolerance": safety_tolerance,
-                "aspect_ratio": aspect_ratio
-            }
-            
-            # Add seed if provided (not -1)
-            if seed != -1:
-                arguments["seed"] = seed
-            
-            # Submit the request and get the result
-            result = ApiHandler.submit_and_get_result("fal-ai/flux-pro/kontext/max", arguments)
-            
-            # Log the full result for debugging (comment out in production)
-            print("API Response:", json.dumps(result, indent=2, default=str))
-            
-            # Check for NSFW indicators in the response
-            if self._is_nsfw_response(result):
-                print("NSFW content detected in API response - returning empty output")
-                return tuple()
-            
-            # Process the result and get the image tensor
-            processed_result = ResultProcessor.process_image_result(result)
-            
-            # Check if the result is a black image (likely NSFW)
-            if processed_result and len(processed_result) > 0:
-                img_tensor = processed_result[0]
-                # Check if image is entirely black (NSFW content)
-                if torch.all(img_tensor == 0):
-                    print("NSFW content detected (black image) - returning empty output")
-                    return tuple()
-                
-            return processed_result
-            
-        except Exception as e:
-            # Print error to console
-            print(f"Error in FLUX Kontext Max: {str(e)}")
-            
-            # Return empty tuple to prevent output
-            return tuple()
-    
-    def _is_nsfw_response(self, result):
-        """
-        Check if the API response indicates NSFW content.
-        This method looks for common indicators in the response structure.
-        """
-        # Check if result is a dictionary
+        # Upload the input image to get a URL
+        image_url = ImageUtils.upload_image(image)
+        if not image_url:
+            self._raise("FAL: failed to upload input image.")
+
+        # Prepare the arguments for the API call
+        arguments = {
+            "prompt": prompt,
+            "image_url": image_url,
+            "guidance_scale": CFG,
+            "num_images": num_images,
+            "output_format": output_format,
+            "sync_mode": sync_mode,
+            "safety_tolerance": safety_tolerance,
+            "aspect_ratio": aspect_ratio
+        }
+        if seed != -1:
+            arguments["seed"] = seed
+
+        # Submit the request and get the result (ApiHandler re-raises on failures)
+        result = ApiHandler.submit_and_get_result("fal-ai/flux-pro/kontext/max", arguments)
+
+        # Basic structural validations
         if not isinstance(result, dict):
-            return False
-            
-        # Check for common NSFW indicator fields
-        nsfw_indicators = [
-            'nsfw', 'is_nsfw', 'content_flag', 'safety_attributes', 
-            'content_filter', 'moderation', 'safety'
-        ]
-        
-        # Check top-level fields
-        for indicator in nsfw_indicators:
-            if indicator in result:
-                # If the field exists and is truthy, consider it NSFW
-                if result[indicator]:
-                    print(f"NSFW detected via '{indicator}' field: {result[indicator]}")
-                    return True
-        
-        # Check for NSFW flags in images
-        if 'images' in result and isinstance(result['images'], list):
-            for img in result['images']:
-                for indicator in nsfw_indicators:
-                    if indicator in img and img[indicator]:
-                        print(f"NSFW detected in image via '{indicator}' field: {img[indicator]}")
-                        return True
-        
-        # Check for error messages that might indicate NSFW filtering
-        if 'error' in result and isinstance(result['error'], dict):
-            error_msg = result['error'].get('message', '').lower()
-            if any(term in error_msg for term in ['nsfw', 'safety', 'filter', 'moderation']):
-                print(f"NSFW detected via error message: {error_msg}")
-                return True
-                
-        return False
+            self._raise("FAL: unexpected response type (expected dict).")
+        if "images" not in result or not result["images"]:
+            # Some errors come under an 'error' key; surface that if present
+            err_msg = None
+            if isinstance(result.get("error"), dict):
+                err_msg = result["error"].get("message") or result["error"].get("detail")
+            self._raise(f"FAL: no images returned{f' ({err_msg})' if err_msg else ''}.")
+
+        # NSFW detection via official field
+        has_nsfw = result.get("has_nsfw_concepts")
+        if isinstance(has_nsfw, list) and any(bool(x) for x in has_nsfw):
+            self._raise("FAL: NSFW content detected by safety system (has_nsfw_concepts).")
+
+        # Process images (may raise)
+        processed_result = ResultProcessor.process_image_result(result)
+
+        # Check for black/empty image(s) and abort
+        if processed_result and len(processed_result) > 0:
+            img_tensor = processed_result[0]
+            if not isinstance(img_tensor, torch.Tensor):
+                self._raise("FAL: internal error — processed image is not a tensor.")
+            # Consider a frame 'black' if all pixels are exactly zero OR mean is extremely low
+            if torch.all(img_tensor == 0) or (img_tensor.mean() < 1e-6):
+                self._raise("FAL: received an all-black image (likely filtered/failed).")
+
+        return processed_result

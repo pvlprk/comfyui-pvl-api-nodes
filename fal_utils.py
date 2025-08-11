@@ -1,3 +1,4 @@
+
 import configparser
 import io
 import os
@@ -31,22 +32,17 @@ class FalConfig:
 
         try:
             if os.environ.get("FAL_KEY") is not None:
-                print("FAL_KEY found in environment variables")
                 self._key = os.environ["FAL_KEY"]
             else:
-                print("FAL_KEY not found in environment variables")
                 self._key = config["API"]["FAL_KEY"]
-                print("FAL_KEY found in config.ini")
                 os.environ["FAL_KEY"] = self._key
-                print("FAL_KEY set in environment variables")
-
-            if self._key == "<your_fal_api_key_here>":
-                print("WARNING: You are using the default FAL API key placeholder!")
         except KeyError:
-            print("Error: FAL_KEY not found in config.ini or environment variables")
+            raise RuntimeError("FAL: API key not found in environment or config.ini")
 
     def get_client(self):
         if self._client is None:
+            if not self._key or self._key == "<your_fal_api_key_here>":
+                raise RuntimeError("FAL: invalid API key (missing or placeholder).")
             self._client = SyncClient(key=self._key)
         return self._client
 
@@ -75,28 +71,27 @@ class ImageUtils:
 
             return Image.fromarray(image_np)
         except Exception as e:
-            print(f"Error converting tensor to PIL: {str(e)}")
-            return None
+            raise RuntimeError(f"FAL: error converting tensor to PIL: {str(e)}")
 
     @staticmethod
     def upload_image(image):
+        pil_image = ImageUtils.tensor_to_pil(image)
+        if pil_image is None:
+            raise RuntimeError("FAL: input image conversion failed.")
+        temp_file_path = None
         try:
-            pil_image = ImageUtils.tensor_to_pil(image)
-            if not pil_image:
-                return None
-
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
                 pil_image.save(temp_file, format="PNG")
                 temp_file_path = temp_file.name
-
             client = FalConfig().get_client()
             image_url = client.upload_file(temp_file_path)
+            if not image_url:
+                raise RuntimeError("FAL: upload_file returned no URL.")
             return image_url
         except Exception as e:
-            print(f"Error uploading image: {str(e)}")
-            return None
+            raise RuntimeError(f"FAL: error uploading image: {str(e)}")
         finally:
-            if "temp_file_path" in locals():
+            if temp_file_path and os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
 
     @staticmethod
@@ -112,44 +107,45 @@ class ImageUtils:
 class ResultProcessor:
     @staticmethod
     def process_image_result(result):
+        if "images" not in result or not isinstance(result["images"], list) or not result["images"]:
+            raise RuntimeError("FAL: response contained no images.")
+        images = []
         try:
-            images = []
             for img_info in result["images"]:
-                img_url = img_info["url"]
-                img_response = requests.get(img_url)
+                img_url = img_info.get("url")
+                if not img_url:
+                    raise RuntimeError("FAL: image entry missing URL.")
+                img_response = requests.get(img_url, timeout=60)
+                img_response.raise_for_status()
                 img = Image.open(io.BytesIO(img_response.content)).convert("RGB")
                 img_array = np.array(img).astype(np.float32) / 255.0
                 images.append(img_array)
-
-            # Stack the images along a new first dimension (batch)
-            stacked_images = np.stack(images, axis=0)  # (B, H, W, C)
-            img_tensor = torch.from_numpy(stacked_images)
-            return (img_tensor,)
         except Exception as e:
-            print(f"Error processing image result: {str(e)}")
-            return ResultProcessor.create_blank_image()
+            raise RuntimeError(f"FAL: error downloading/decoding image(s): {str(e)}")
+
+        stacked_images = np.stack(images, axis=0)  # (B, H, W, C)
+        img_tensor = torch.from_numpy(stacked_images)
+        return (img_tensor,)
 
     @staticmethod
     def create_blank_image():
         blank_img = Image.new("RGB", (512, 512), color="black")
         img_array = np.array(blank_img).astype(np.float32) / 255.0
-        # Add batch dimension: (H, W, C) -> (1, H, W, C)
         img_tensor = torch.from_numpy(img_array).unsqueeze(0)
         return (img_tensor,)
-        
-        
+
+
 class ApiHandler:
     @staticmethod
     def submit_and_get_result(endpoint, arguments):
+        client = FalConfig().get_client()
         try:
-            client = FalConfig().get_client()
             handler = client.submit(endpoint, arguments=arguments)
             return handler.get()
         except Exception as e:
-            print(f"Error submitting to {endpoint}: {str(e)}")
-            raise e
+            raise RuntimeError(f"FAL: request failed for {endpoint}: {str(e)}")
 
     @staticmethod
     def handle_image_generation_error(model_name, error):
-        print(f"Error generating image with {model_name}: {str(error)}")
-        return ResultProcessor.create_blank_image()
+        # Keep, but raise instead of returning a blank image
+        raise RuntimeError(f"FAL: error generating image with {model_name}: {str(error)}")

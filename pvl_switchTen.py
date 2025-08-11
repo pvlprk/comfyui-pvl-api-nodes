@@ -1,3 +1,57 @@
+import torch
+
+def MakeSmartType(t):
+    if isinstance(t, str):
+        return SmartType(t)
+    return t
+
+class SmartType(str):
+    def __ne__(self, other):
+        if self == "*" or other == "*":
+            return False
+        selfset = set(self.split(','))
+        otherset = set(other.split(','))
+        return not selfset.issubset(otherset)
+
+def VariantSupport():
+    def decorator(cls):
+        if hasattr(cls, "INPUT_TYPES"):
+            old_input_types = getattr(cls, "INPUT_TYPES")
+            def new_input_types(*args, **kwargs):
+                types = old_input_types(*args, **kwargs)
+                for category in ["required", "optional"]:
+                    if category not in types:
+                        continue
+                    for key, value in types[category].items():
+                        if isinstance(value, tuple):
+                            types[category][key] = (MakeSmartType(value[0]),) + value[1:]
+                return types
+            setattr(cls, "INPUT_TYPES", new_input_types)
+        if hasattr(cls, "RETURN_TYPES"):
+            old_return_types = cls.RETURN_TYPES
+            setattr(cls, "RETURN_TYPES", tuple(MakeSmartType(x) for x in old_return_types))
+        if hasattr(cls, "VALIDATE_INPUTS"):
+            # Reflection is used to determine what the function signature is, so we can't just change the function signature
+            raise NotImplementedError("VariantSupport does not support VALIDATE_INPUTS yet")
+        else:
+            def validate_inputs(input_types):
+                inputs = cls.INPUT_TYPES()
+                for key, value in input_types.items():
+                    if isinstance(value, SmartType):
+                        continue
+                    if "required" in inputs and key in inputs["required"]:
+                        expected_type = inputs["required"][key][0]
+                    elif "optional" in inputs and key in inputs["optional"]:
+                        expected_type = inputs["optional"][key][0]
+                    else:
+                        expected_type = None
+                    if expected_type is not None and MakeSmartType(value) != expected_type:
+                        return f"Invalid type of {key}: {value} (expected {expected_type})"
+                return True
+            setattr(cls, "VALIDATE_INPUTS", validate_inputs)
+        return cls
+    return decorator
+
 @VariantSupport()
 class PVL_Switch_Huge:
     def __init__(self):
@@ -39,40 +93,77 @@ class PVL_Switch_Huge:
     FUNCTION = "switch_case"
     CATEGORY = "PVL_tools"
 
-    DESCRIPTION = """
-    Extended FL_Switch_Big allows you to choose between up to 10 processing paths based on a switch condition.
-    """
 
-    def check_lazy_status(self, switch_condition, 
-                          case_1, case_2, case_3, case_4, case_5, 
-                          case_6, case_7, case_8, case_9, case_10, 
-                          input_default=None,
-                          input_1=None, input_2=None, input_3=None, 
-                          input_4=None, input_5=None, input_6=None, 
-                          input_7=None, input_8=None, input_9=None, 
-                          input_10=None):
+    def check_lazy_status(self, switch_condition, case_1, case_2, case_3, case_4, case_5, 
+                         case_6, case_7, case_8, case_9, case_10,
+                         input_default=None, input_1=None, input_2=None, input_3=None, 
+                         input_4=None, input_5=None, input_6=None, input_7=None, 
+                         input_8=None, input_9=None, input_10=None):
         lazy_inputs = []
-        for idx in range(1, 11):
-            if switch_condition == locals()[f"case_{idx}"]:
-                if locals()[f"input_{idx}"] is None:
-                    lazy_inputs.append(f"input_{idx}")
-                break
+        
+        # Check which inputs need to be evaluated
+        if switch_condition == case_1:
+            if input_1 is None:
+                lazy_inputs.append("input_1")
+        elif switch_condition == case_2:
+            if input_2 is None:
+                lazy_inputs.append("input_2")
+        elif switch_condition == case_3:
+            if input_3 is None:
+                lazy_inputs.append("input_3")
+        elif switch_condition == case_4:
+            if input_4 is None:
+                lazy_inputs.append("input_4")
+        elif switch_condition == case_5:
+            if input_5 is None:
+                lazy_inputs.append("input_5")
+        elif switch_condition == case_6:
+            if input_6 is None:
+                lazy_inputs.append("input_6")
+        elif switch_condition == case_7:
+            if input_7 is None:
+                lazy_inputs.append("input_7")
+        elif switch_condition == case_8:
+            if input_8 is None:
+                lazy_inputs.append("input_8")
+        elif switch_condition == case_9:
+            if input_9 is None:
+                lazy_inputs.append("input_9")
+        elif switch_condition == case_10:
+            if input_10 is None:
+                lazy_inputs.append("input_10")
         else:
             if input_default is None:
                 lazy_inputs.append("input_default")
+                
         return lazy_inputs
 
-    def switch_case(self, switch_condition, 
-                    case_1, case_2, case_3, case_4, case_5, 
-                    case_6, case_7, case_8, case_9, case_10,
-                    input_default,
-                    input_1=None, input_2=None, input_3=None, 
-                    input_4=None, input_5=None, input_6=None, 
-                    input_7=None, input_8=None, input_9=None, 
-                    input_10=None):
+    def switch_case(self, switch_condition, case_1, case_2, case_3, case_4, case_5, 
+                   case_6, case_7, case_8, case_9, case_10,
+                   input_default, input_1=None, input_2=None, input_3=None, 
+                   input_4=None, input_5=None, input_6=None, input_7=None, 
+                   input_8=None, input_9=None, input_10=None):
         output = input_default
-        for idx in range(1, 11):
-            if switch_condition == locals()[f"case_{idx}"] and locals()[f"input_{idx}"] is not None:
-                output = locals()[f"input_{idx}"]
-                break
+        
+        if switch_condition == case_1 and input_1 is not None:
+            output = input_1
+        elif switch_condition == case_2 and input_2 is not None:
+            output = input_2
+        elif switch_condition == case_3 and input_3 is not None:
+            output = input_3
+        elif switch_condition == case_4 and input_4 is not None:
+            output = input_4
+        elif switch_condition == case_5 and input_5 is not None:
+            output = input_5
+        elif switch_condition == case_6 and input_6 is not None:
+            output = input_6
+        elif switch_condition == case_7 and input_7 is not None:
+            output = input_7
+        elif switch_condition == case_8 and input_8 is not None:
+            output = input_8
+        elif switch_condition == case_9 and input_9 is not None:
+            output = input_9
+        elif switch_condition == case_10 and input_10 is not None:
+            output = input_10
+            
         return (output,)
