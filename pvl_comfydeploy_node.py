@@ -1,6 +1,7 @@
 import requests
 import base64
 import time
+import json
 import torch
 import numpy as np
 from io import BytesIO
@@ -31,8 +32,8 @@ class ComfyDeployNode:
 
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "text")
-    FUNCTION = "invoke_comfydeploy"
-    CATEGORY = "API"
+    FUNCTION = "invoke_comfydeploy_workflow"
+    CATEGORY = "PVL_tools"
 
     def invoke_comfydeploy(self, deployment_id, api_key, batch_size,
                            nonHumanChar, mode, three_view, gemini_gpt_switch,
@@ -66,7 +67,11 @@ class ComfyDeployNode:
             "T5-CLIP_prompt_splitter": t5_clip_prompt_splitter,
             "add_missing_clothes": add_missing_clothes
         })
-
+        
+        print(f"[DEBUG] Prompt: '{prompt}'")
+        print("[DEBUG] Payload being sent:")
+        print(json.dumps({"deployment_id": deployment_id, "inputs": inputs}, indent=2))
+        
         response = requests.post(
             "https://api.comfydeploy.com/api/run/deployment/queue",
             json={"deployment_id": deployment_id, "inputs": inputs},
@@ -80,7 +85,7 @@ class ComfyDeployNode:
         if not run_id:
             raise Exception("ComfyDeploy did not return a valid run ID.")
 
-        max_wait = 240
+        max_wait = 150
         interval = 5
         waited = 0
 
