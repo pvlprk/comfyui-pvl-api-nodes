@@ -70,8 +70,8 @@ class CallAssistantNode:
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("assistant_response",)
-    FUNCTION = "call_assistant"
-    CATEGORY = "OpenAI"
+    FUNCTION = "call_GPT_assistant"
+    CATEGORY = "PVL_tools"
 
     @staticmethod
     def undefined_to_none(value):
