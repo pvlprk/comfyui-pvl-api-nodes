@@ -9,6 +9,14 @@ from .pvl_fal_kontext_max_single import PVL_fal_KontextMaxSingle_API
 from .pvl_fal_kontext_dev_inpaint import PVL_fal_KontextDevInpaint_API
 from .pvl_fal_flux_general import PVL_fal_FluxGeneral_API
 from .pvl_switchTen import PVL_Switch_Huge
+from .pvl_fal_kontext_dev_lora import PVL_fal_KontextDevLora_API
+from .pvl_fal_kontext_pro import PVL_fal_KontextPro_API
+from .pvl_fal_flux_pro11_ultra import PVL_fal_FluxPro_v1_1_Ultra_API
+from .pvl_fal_flux_pro_fill import PVL_fal_FluxPro_Fill_API
+from .pvl_fal_kontext_dev import PVL_fal_Kontext_Dev_API
+from .pvl_fal_lumaphoton_flash_reframe import PVL_fal_LumaPhoton_FlashReframe_API
+from .pvl_fal_lumaphoton_reframe import PVL_fal_LumaPhoton_Reframe_API
+from .pvl_NoneOutputNode import PVL_NoneOutputNode
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -21,7 +29,15 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_KontextMaxSingle_API": PVL_fal_KontextMaxSingle_API,
     "PVL_fal_KontextDevInpaint_API": PVL_fal_KontextDevInpaint_API, 
     "PVL_fal_FluxGeneral_API": PVL_fal_FluxGeneral_API,
-    "PVL_Switch_Huge": PVL_Switch_Huge
+    "PVL_Switch_Huge": PVL_Switch_Huge,
+    "PVL_fal_KontextDevLora_API": PVL_fal_KontextDevLora_API,
+    "PVL_fal_KontextPro_API": PVL_fal_KontextPro_API,
+    "PVL_fal_FluxPro_v1_1_Ultra_API": PVL_fal_FluxPro_v1_1_Ultra_API,
+    "PVL_fal_FluxPro_Fill_API": PVL_fal_FluxPro_Fill_API,
+    "PVL_fal_Kontext_Dev_API": PVL_fal_Kontext_Dev_API,
+    "PVL_fal_LumaPhoton_FlashReframe_API": PVL_fal_LumaPhoton_FlashReframe_API,
+    "PVL_fal_LumaPhoton_Reframe_API": PVL_fal_LumaPhoton_Reframe_API,
+    "PVL_NoneOutputNode": PVL_NoneOutputNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -35,5 +51,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_KontextMaxSingle_API": "PVL Kontext Max Single (fal.ai)",
     "PVL_fal_KontextDevInpaint_API": "PVL Kontext Dev Inpaint (fal.ai)",
     "PVL_fal_FluxGeneral_API": "PVL FLUX General (fal.ai)",
-    "PVL_Switch_Huge": "PVL Switch Huge"
- }
+    "PVL_Switch_Huge": "PVL Switch Huge",
+    "PVL_fal_KontextDevLora_API": "PVL Kontext Dev LoRA (fal.ai)",
+    "PVL_fal_KontextPro_API": "PVL Kontext Pro (fal.ai)",
+    "PVL_fal_FluxPro_v1_1_Ultra_API": "PVL FluxPro1.1 Ultra (fal.ai)",
+    "PVL_fal_FluxPro_Fill_API": "PVL FluxPro Fill (fal.ai)",
+    "PVL_fal_Kontext_Dev_API": "PVL Kontext Dev (fal.ai)",
+    "PVL_fal_LumaPhoton_Reframe_API": "PVL LumaPhoton Reframe (fal.ai)",
+    "PVL_NoneOutputNode": "PVL NoneOutputNode",
+}
