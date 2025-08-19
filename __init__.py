@@ -17,6 +17,7 @@ from .pvl_fal_kontext_dev import PVL_fal_Kontext_Dev_API
 from .pvl_fal_lumaphoton_flash_reframe import PVL_fal_LumaPhoton_FlashReframe_API
 from .pvl_fal_lumaphoton_reframe import PVL_fal_LumaPhoton_Reframe_API
 from .pvl_NoneOutputNode import PVL_NoneOutputNode
+from .pvl_SaveOrNot import PVL_SaveOrNot
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -38,6 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_LumaPhoton_FlashReframe_API": PVL_fal_LumaPhoton_FlashReframe_API,
     "PVL_fal_LumaPhoton_Reframe_API": PVL_fal_LumaPhoton_Reframe_API,
     "PVL_NoneOutputNode": PVL_NoneOutputNode,
+    "PVL_SaveOrNot": PVL_SaveOrNot,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -59,4 +61,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_Kontext_Dev_API": "PVL Kontext Dev (fal.ai)",
     "PVL_fal_LumaPhoton_Reframe_API": "PVL LumaPhoton Reframe (fal.ai)",
     "PVL_NoneOutputNode": "PVL NoneOutputNode",
+    "PVL_SaveOrNot": "PVL Save Or Not",
 }
