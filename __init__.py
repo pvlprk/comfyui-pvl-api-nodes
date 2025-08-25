@@ -18,6 +18,8 @@ from .pvl_fal_lumaphoton_flash_reframe import PVL_fal_LumaPhoton_FlashReframe_AP
 from .pvl_fal_lumaphoton_reframe import PVL_fal_LumaPhoton_Reframe_API
 from .pvl_NoneOutputNode import PVL_NoneOutputNode
 from .pvl_SaveOrNot import PVL_SaveOrNot
+from .pvl_ImageResize import PVL_ImageResize
+from .pvl_ImageStitch import PVL_ImageStitch
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -40,6 +42,8 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_LumaPhoton_Reframe_API": PVL_fal_LumaPhoton_Reframe_API,
     "PVL_NoneOutputNode": PVL_NoneOutputNode,
     "PVL_SaveOrNot": PVL_SaveOrNot,
+    "PVL_ImageResize": PVL_ImageResize,
+    "PVL_ImageStitch": PVL_ImageStitch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -62,4 +66,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_LumaPhoton_Reframe_API": "PVL LumaPhoton Reframe (fal.ai)",
     "PVL_NoneOutputNode": "PVL NoneOutputNode",
     "PVL_SaveOrNot": "PVL Save Or Not",
+    "PVL_ImageResize": "PVL Image Resize",
+    "PVL_ImageStitch": "PVL Image Stitch",
 }
