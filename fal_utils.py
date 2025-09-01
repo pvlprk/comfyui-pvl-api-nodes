@@ -1,12 +1,11 @@
 
 import base64
-import configparser
 import io
 import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -24,7 +23,7 @@ for _name in ("httpx", "urllib3", "fal_client"):
 
 @dataclass
 class FalConfig:
-    """Holds configuration and lazy client creation for fal.ai."""
+    """Holds configuration and helpers for fal.ai client/module access."""
     api_key_env_vars: Tuple[str, ...] = ("FAL_KEY", "FAL_API_KEY", "FAL_CLIENT_KEY")
 
     @classmethod
@@ -36,8 +35,8 @@ class FalConfig:
         return None
 
     @classmethod
-    def get_client(cls):
-        """Return fal_client module if installed, configured with API key if present."""
+    def get_module(cls):
+        """Return the 'fal_client' module, configured with API key if possible."""
         try:
             import fal_client  # type: ignore
         except Exception as e:
@@ -47,11 +46,31 @@ class FalConfig:
 
         api_key = cls.get_api_key()
         if api_key:
+            # Newer fal-client reads it from env; some expose top-level api_key attr
             try:
-                fal_client.api_key = api_key  # newer versions
+                fal_client.api_key = api_key  # type: ignore[attr-defined]
             except Exception:
                 os.environ["FAL_KEY"] = api_key
         return fal_client
+
+    @classmethod
+    def make_sync_client(cls):
+        """Instantiate fal_client.SyncClient() if available, with API key configured."""
+        fal_client = cls.get_module()
+        SyncClient = getattr(fal_client, "SyncClient", None)
+        if SyncClient is None:
+            return None
+        try:
+            return SyncClient()
+        except Exception:
+            # Some versions require api_key arg explicitly
+            api_key = cls.get_api_key()
+            if api_key:
+                try:
+                    return SyncClient(api_key=api_key)
+                except Exception:
+                    pass
+        return None
 
 
 class ImageUtils:
@@ -93,8 +112,9 @@ class ImageUtils:
     @staticmethod
     def upload_image(image_tensor: torch.Tensor) -> str:
         """
-        Save to a temporary PNG and upload via fal_client.upload_file().
+        Save to a temporary PNG and upload via fal_client upload method.
         Returns an HTTPS URL that can be passed to the FAL model.
+        Supports both module-level and SyncClient instance APIs.
         """
         pil_image = ImageUtils.tensor_to_pil(image_tensor)
         if pil_image is None:
@@ -104,13 +124,25 @@ class ImageUtils:
             tmp_path = tmp.name
         try:
             pil_image.save(tmp_path, format="PNG")
-            fal_client = FalConfig.get_client()
-            uploaded = fal_client.upload_file(tmp_path)
-            # fal_client returns either a dict or a URL string depending on version
-            if isinstance(uploaded, dict):
-                url = uploaded.get("url") or uploaded.get("file_url") or uploaded.get("signed_url")
-            else:
-                url = str(uploaded)
+            fal_module = FalConfig.get_module()
+            url: Optional[str] = None
+
+            # 1) module-level upload_file
+            uploader = getattr(fal_module, "upload_file", None)
+            if callable(uploader):
+                uploaded = uploader(tmp_path)
+                url = (uploaded.get("url") if isinstance(uploaded, dict) else str(uploaded))  # type: ignore[assignment]
+
+            # 2) instance method upload_file, e.g., SyncClient.upload_file
+            if not url:
+                sc = FalConfig.make_sync_client()
+                if sc is not None and hasattr(sc, "upload_file"):
+                    uploaded = sc.upload_file(tmp_path)
+                    if isinstance(uploaded, dict):
+                        url = uploaded.get("url") or uploaded.get("file_url") or uploaded.get("signed_url")
+                    else:
+                        url = str(uploaded)
+
             if not url or not isinstance(url, str):
                 raise RuntimeError("FAL: upload_file returned no URL.")
             return url
@@ -147,8 +179,8 @@ class ResultProcessor:
 
         images_np = []
         for img_info in result["images"]:
-            # Most FAL models return items like {"url": "...", "content_type": "..."}.
-            # Some return {"content": "data:image/png;base64,..."} in sync mode.
+            # Common forms:
+            #   {"url": "https://..."} or {"url": "data:image/png;base64,..."} or {"content": "data:..."}
             img_url = img_info.get("url")
             content = img_info.get("content")
 
@@ -180,31 +212,99 @@ class ResultProcessor:
 
 class ApiHandler:
     @staticmethod
-    def submit_and_get_result(model_id: str, arguments: Dict) -> Dict:
+    def _submit_module_style(fal_module: Any, model_id: str, arguments: Dict) -> Optional[Dict]:
         """
-        Submits a request and waits synchronously for the final JSON result.
-        Prefers fal_client if installed. Raises RuntimeError on failure.
+        Path A: module-level API where submit() returns a handler with .get(),
+        or a dict containing request_id. Attempts both.
         """
-        fal_client = FalConfig.get_client()
+        submit_fn = getattr(fal_module, "submit", None)
+        if not callable(submit_fn):
+            return None
 
-        # Try the common submit/result pair
-        try:
-            task = fal_client.submit(model_id, arguments=arguments)
-            # Some versions return a dict with 'request_id'; both forms are supported
+        handler = submit_fn(model_id, arguments=arguments)
+
+        # 1) If handler has .get(), prefer that.
+        if hasattr(handler, "get") and callable(getattr(handler, "get")):
             try:
-                res = fal_client.result(task)
+                res = handler.get()
+                if isinstance(res, dict):
+                    return res
             except Exception:
-                req_id = task.get("request_id") if isinstance(task, dict) else task
-                res = fal_client.result(req_id)
-            if not isinstance(res, dict):
-                raise RuntimeError("unexpected result type")
-            return res
-        except Exception as e_submit:
-            # Fallback: try subscribe (streaming) and capture the final result
+                pass
+
+        # 2) If handler is dict with request_id, try result(request_id)
+        req_id = None
+        if isinstance(handler, dict):
+            req_id = handler.get("request_id") or handler.get("id") or handler.get("task_id")
+
+        if req_id:
+            result_fn = getattr(fal_module, "result", None)
+            if callable(result_fn):
+                try:
+                    res = result_fn(req_id)
+                    if isinstance(res, dict):
+                        return res
+                except TypeError:
+                    # In some versions result() is a SyncClient method (bound), not module-level.
+                    pass
+
+            # Try SyncClient instance as a fallback
+            sc = FalConfig.make_sync_client()
+            if sc is not None and hasattr(sc, "result"):
+                res = sc.result(req_id)
+                if isinstance(res, dict):
+                    return res
+
+        return None
+
+    @staticmethod
+    def _submit_instance_style(fal_module: Any, model_id: str, arguments: Dict) -> Optional[Dict]:
+        """
+        Path B: instance API using SyncClient() with submit()/result() methods.
+        """
+        sc = FalConfig.make_sync_client()
+        if sc is None:
+            return None
+        submit_m = getattr(sc, "submit", None)
+        if not callable(submit_m):
+            return None
+
+        handler = submit_m(model_id, arguments=arguments)
+
+        # 1) handler.get()
+        if hasattr(handler, "get") and callable(getattr(handler, "get")):
+            try:
+                res = handler.get()
+                if isinstance(res, dict):
+                    return res
+            except Exception:
+                pass
+
+        # 2) handler dict -> result(req_id)
+        req_id = None
+        if isinstance(handler, dict):
+            req_id = handler.get("request_id") or handler.get("id") or handler.get("task_id")
+        elif hasattr(handler, "request_id"):
+            req_id = getattr(handler, "request_id")
+
+        if req_id:
+            res = sc.result(req_id)
+            if isinstance(res, dict):
+                return res
+
+        return None
+
+    @staticmethod
+    def _subscribe_stream(fal_module: Any, model_id: str, arguments: Dict) -> Optional[Dict]:
+        """
+        Streaming fallback: iterate subscribe() either from module-level or SyncClient instance.
+        """
+        # Module-level subscribe
+        subscribe_fn = getattr(fal_module, "subscribe", None)
+        if callable(subscribe_fn):
             try:
                 final = None
-                for event in fal_client.subscribe(model_id, arguments=arguments):
-                    # event may be {'type': 'result', 'result': {...}} or {'event': 'completed', 'data': {...}}
+                for event in subscribe_fn(model_id, arguments=arguments):
                     if isinstance(event, dict):
                         if event.get("type") == "result" and isinstance(event.get("result"), dict):
                             final = event["result"]
@@ -215,4 +315,45 @@ class ApiHandler:
             except Exception:
                 pass
 
-            raise RuntimeError(f"FAL: submit failed: {str(e_submit)}")
+        # Instance subscribe
+        sc = FalConfig.make_sync_client()
+        if sc is not None and hasattr(sc, "subscribe"):
+            try:
+                final = None
+                for event in sc.subscribe(model_id, arguments=arguments):
+                    if isinstance(event, dict):
+                        if event.get("type") == "result" and isinstance(event.get("result"), dict):
+                            final = event["result"]
+                        elif event.get("event") in ("completed", "result") and isinstance(event.get("data"), dict):
+                            final = event["data"]
+                if isinstance(final, dict):
+                    return final
+            except Exception:
+                pass
+
+        return None
+
+    @staticmethod
+    def submit_and_get_result(model_id: str, arguments: Dict) -> Dict:
+        """
+        Submits a request and waits synchronously for the final JSON result.
+        Compatible with multiple fal_client versions (module-level and SyncClient).
+        """
+        fal_module = FalConfig.get_module()
+
+        # Try module-level submit flows
+        res = ApiHandler._submit_module_style(fal_module, model_id, arguments)
+        if isinstance(res, dict):
+            return res
+
+        # Try instance-based flow
+        res = ApiHandler._submit_instance_style(fal_module, model_id, arguments)
+        if isinstance(res, dict):
+            return res
+
+        # Fallback to streaming
+        res = ApiHandler._subscribe_stream(fal_module, model_id, arguments)
+        if isinstance(res, dict):
+            return res
+
+        raise RuntimeError("FAL: submit failed: no compatible fal_client interface found or call did not return a result.")
