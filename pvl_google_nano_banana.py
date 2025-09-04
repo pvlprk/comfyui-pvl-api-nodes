@@ -4,7 +4,8 @@
 # Author: PVL
 # License: MIT
 
-import os, io, json, base64, typing as T, requests, numpy as np
+import os, io, json, base64, typing as T, requests, numpy as np, time, random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 import torch
 
@@ -62,12 +63,14 @@ def _extract_inline_blob(part: dict) -> T.Optional[bytes]:
 
 class PVL_Google_NanoBanana_API:
     """
-    Minimal ComfyUI node for Gemini 2.5 Flash Image Preview (nano-banana).
-    - Prompt + optional input IMAGE batch
-    - Only temperature exposed; top_p/top_k/max_tokens fixed internally
+    ComfyUI node for Gemini 2.5 Flash Image Preview ("nano-banana").
+    - Prompt + optional input IMAGE batch (as references)
+    - Temperature exposed; top_p/top_k/max_tokens fixed internally
     - Optional text capture (also prints to console when enabled)
     - Safety level 0..3 (OFF→HIGH)
     - API key from input or GEMINI_API_KEY
+    - num_images → sends multiple requests in parallel and returns a batch
+    - Always includes *all* images from each response (no UI switch)
     """
 
     @classmethod
@@ -85,11 +88,16 @@ class PVL_Google_NanoBanana_API:
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
                 # Only affects encoding of input images (output mime is decided by API)
                 "output_format": (["png","jpeg"], {"default": "png"}),
-                "return_all_images": ("BOOLEAN", {"default": False}),
+                # Print & return any text parts the API includes
                 "capture_text_output": ("BOOLEAN", {"default": False}),
+                # Safety level: 0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH
                 "safety_level": ("INT", {"default": 0, "min": 0, "max": 3, "step": 1}),
+                # Number of parallel images to generate (sends N parallel requests)
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
+                # Networking
                 "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
                 "request_id": ("STRING", {"default": ""}),
+                # Debug
                 "debug_log": ("BOOLEAN", {"default": False}),
             }
         }
@@ -135,13 +143,20 @@ class PVL_Google_NanoBanana_API:
         except Exception:
             return default
 
+    def _single_call(self, req: dict, url: str, headers: dict, timeout: int) -> dict:
+        r = requests.post(url, headers=headers, data=json.dumps(req), timeout=timeout)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Gemini API error {r.status_code}: {r.text}")
+        return r.json()
+
     # ---- main ----
     def run(self, prompt: str, images: T.Optional[torch.Tensor] = None,
             model: str = DEFAULT_MODEL, endpoint_override: str = "",
             api_key: str = "",
             temperature: float = 0.6, output_format: str = "png",
-            return_all_images: bool = False, capture_text_output: bool = False,
-            safety_level: T.Any = 0, timeout_sec: int = 120, request_id: str = "",
+            capture_text_output: bool = False,
+            safety_level: T.Any = 0, num_images: int = 1,
+            timeout_sec: int = 120, request_id: str = "",
             debug_log: bool = False):
 
         key = (api_key or os.getenv("GEMINI_API_KEY","")).strip()
@@ -151,7 +166,7 @@ class PVL_Google_NanoBanana_API:
         input_mime = "image/png" if str(output_format).lower() == "png" else "image/jpeg"
         want_text = bool(capture_text_output)
 
-        req = {
+        base_req = {
             "contents": [{
                 "role": "user",
                 "parts": ([{"text": prompt}] if prompt.strip() else []) + self._encode_images(images, input_mime)
@@ -161,55 +176,74 @@ class PVL_Google_NanoBanana_API:
 
         level = self._coerce_int(safety_level, 0)
         s = self._safety(level)
-        if s: req["safety_settings"] = s
+        if s: base_req["safety_settings"] = s
 
         url = endpoint_override.strip() or DEFAULT_ENDPOINT.format(model=model)
-        headers = {"Content-Type":"application/json","x-goog-api-key":key}
-        if request_id.strip():
-            headers["x-goog-request-params"] = f"requestId={request_id.strip()}"
+        base_headers = {"Content-Type":"application/json","x-goog-api-key":key}
 
-        r = requests.post(url, headers=headers, data=json.dumps(req), timeout=int(self._coerce_int(timeout_sec,120)))
-        if r.status_code >= 400:
-            raise RuntimeError(f"Gemini API error {r.status_code}: {r.text}")
-        data = r.json()
+        # --- parallel requests ---
+        N = max(1, int(self._coerce_int(num_images, 1)))
+        timeout = int(self._coerce_int(timeout_sec, 120))
+        results: list[dict] = [None] * N
 
+        def build_headers(i: int) -> dict:
+            h = dict(base_headers)
+            rid = (request_id.strip() + f"-{i}") if request_id.strip() else f"pvl-nb-{int(time.time()*1000)}-{i}"
+            h["x-goog-request-params"] = f"requestId={rid}"
+            return h
+
+        max_workers = min(N, 6)  # be nice to the API
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for i in range(N):
+                req_i = dict(base_req)  # shallow copy is fine
+                hdrs_i = build_headers(i)
+                time.sleep(random.uniform(0.01, 0.05))  # tiny jitter reduces burstiness
+                fut = ex.submit(self._single_call, req_i, url, hdrs_i, timeout)
+                futures[fut] = i
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    results[i] = fut.result()
+                except Exception as e:
+                    results[i] = {"__error__": str(e)}
+
+        # --- parse all results ---
         out_imgs, out_text = [], []
+        for data in results:
+            imgs_i, text_i = [], []
+            if isinstance(data, dict) and "candidates" in data:
+                cands = data.get("candidates") or []
+                for cand in cands:
+                    parts = (cand.get("content") or {}).get("parts") or []
+                    for p in parts:
+                        blob = _extract_inline_blob(p)
+                        if blob:
+                            try:
+                                img = Image.open(io.BytesIO(blob)).convert("RGB")
+                                imgs_i.append(pil_to_tensor(img))
+                            except Exception:
+                                pass
+                        elif "text" in p and p["text"] is not None:
+                            text_i.append(str(p["text"]))
+            # Always include ALL images from each response (default ON behavior)
+            if imgs_i:
+                out_imgs.extend(imgs_i)
+            else:
+                # no image for this call -> keep placeholder so batch size matches
+                out_imgs.append(pil_to_tensor(Image.new("RGB",(1,1),(0,0,0))))
+            if text_i:
+                out_text.append("\n".join(text_i))
 
-        cands = data.get("candidates") or []
-        for cand in cands:
-            content = cand.get("content") or {}
-            parts = content.get("parts") or []
-            for p in parts:
-                blob = _extract_inline_blob(p)
-                if blob:
-                    try:
-                        img = Image.open(io.BytesIO(blob)).convert("RGB")
-                        out_imgs.append(pil_to_tensor(img))
-                    except Exception:
-                        pass
-                elif "text" in p and p["text"] is not None:
-                    out_text.append(str(p["text"]))
-
-        if not out_imgs:
-            text_out = "\n".join(out_text) if out_text else ""
-            if debug_log:
-                print("[PVL Gemini Debug] No images returned; printing response meta.")
-                if "prompt_feedback" in data:
-                    print("[PVL Gemini Debug] prompt_feedback:", json.dumps(data.get("prompt_feedback"), ensure_ascii=False))
-                if "usage_metadata" in data:
-                    print("[PVL Gemini Debug] usage_metadata:", json.dumps(data.get("usage_metadata"), ensure_ascii=False))
-                if cands:
-                    c0 = cands[0]
-                    meta = {k: c0.get(k) for k in ["safety_ratings","finish_reason","avg_logprobs"] if k in c0}
-                    print("[PVL Gemini Debug] candidate[0] meta:", json.dumps(meta, ensure_ascii=False))
-            # Return black pixel plus any text we got so downstream can inspect
-            img = Image.new("RGB",(1,1),(0,0,0))
-            return (pil_to_tensor(img), text_out)
-
-        images_tensor = torch.cat(out_imgs, dim=0) if (return_all_images and len(out_imgs)>1) else out_imgs[0]
-        final_text = "\n".join(out_text) if (want_text and out_text) else ""
+        # --- finalize outputs ---
+        images_tensor = torch.cat(out_imgs, dim=0) if len(out_imgs) > 1 else out_imgs[0]
+        final_text = ("\n\n---\n\n").join(out_text) if (capture_text_output and out_text) else ""
         if capture_text_output and final_text:
             print(f"[PVL Google NanoBanana Output]:\n{final_text}\n")
+
+        # Optional debug when many requests but no images came back
+        if debug_log and all((t.shape[1] == 1 and t.shape[2] == 1) for t in out_imgs):
+            print("[PVL Gemini Debug] All calls returned no image data. Check safety, model, or prompt.")
 
         return (images_tensor, final_text,)
 
