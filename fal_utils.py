@@ -77,33 +77,59 @@ class ImageUtils:
     @staticmethod
     def tensor_to_pil(image_tensor: torch.Tensor) -> Image.Image:
         """
-        Convert a (H,W,C) float[0..1] or (C,H,W) float[0..1] tensor into RGB PIL.Image.
-        Also accepts uint8.
+        Convert a torch Tensor into an RGB PIL.Image.
+        Accepts:
+          - 4D: (B,H,W,C) or (B,C,H,W) -> uses the first frame
+          - 3D: (H,W,C) or (C,H,W)
+          - 2D: (H,W) -> expands to (H,W,1)
+        Dtypes: float (0..1) or uint8.
         """
         try:
             if not isinstance(image_tensor, torch.Tensor):
                 raise RuntimeError("expected torch.Tensor")
 
             img = image_tensor.detach().cpu()
+
+            # Handle 4D batches: pick first sample
+            if img.ndim == 4:
+                # (B,H,W,C) or (B,C,H,W)
+                img = img[0]
+
+            # Handle 2D grayscale (H,W) -> (H,W,1)
+            if img.ndim == 2:
+                img = img.unsqueeze(-1)  # (H,W,1)
+
             if img.ndim != 3:
-                raise RuntimeError("image tensor must be 3D (HWC or CHW).")
+                raise RuntimeError(f"image tensor must be 2D/3D/4D, got shape {tuple(img.shape)}.")
 
-            # Convert CHW -> HWC
+            # If CHW -> permute to HWC
             if img.shape[0] in (1, 3, 4) and img.shape[2] not in (1, 3, 4):
-                img = img.permute(1, 2, 0)
+                img = img.permute(1, 2, 0)  # (H,W,C)
 
-            # Normalize to uint8
+            # Validate/force HWC
+            if img.ndim != 3 or img.shape[2] not in (1, 3, 4):
+                # If still ambiguous but channels at end look valid, assume HWC
+                if img.shape[0] not in (1, 3, 4) and img.shape[2] in (1, 3, 4):
+                    pass  # already HWC
+                elif img.shape[0] in (1, 3, 4):
+                    img = img.permute(1, 2, 0)
+                else:
+                    raise RuntimeError(f"unrecognized tensor layout {tuple(img.shape)} (expected HWC or CHW).")
+
+            # Normalize dtype -> uint8
             if img.dtype in (torch.float16, torch.float32, torch.float64):
+                # Clamp to [0,1]
                 img = (img.clamp(0, 1) * 255.0).round().to(torch.uint8)
             elif img.dtype != torch.uint8:
                 img = img.to(torch.uint8)
 
             np_img = img.numpy()
+
+            # Expand or drop channels to RGB
             if np_img.shape[2] == 1:
                 np_img = np.repeat(np_img, 3, axis=2)
             elif np_img.shape[2] == 4:
-                # drop alpha (FAL generally expects 3 channels)
-                np_img = np_img[:, :, :3]
+                np_img = np_img[:, :, :3]  # drop alpha
 
             return Image.fromarray(np_img, mode="RGB")
         except Exception as e:
