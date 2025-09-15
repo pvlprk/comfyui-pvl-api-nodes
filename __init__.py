@@ -27,6 +27,9 @@ from .pvl_stitch2size import PVL_Stitch2Size
 from .pvl_crop2AR import PVL_Crop2AR
 from .pvl_style_picker import PVL_StylePicker
 from .pvl_google_nano_banana import PVL_Google_NanoBanana_API
+from .pvl_fal_seedream4_edit import PVL_fal_SeeDream4_API
+from .pvl_fal_qwen_txt2img import PVL_fal_QwenImage_API
+from .pvl_fal_flux_pulid import PVL_fal_FluxPulid
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -58,6 +61,9 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Crop2AR": PVL_Crop2AR,
     "PVL_StylePicker": PVL_StylePicker,
     "PVL_Google_NanoBanana_API": PVL_Google_NanoBanana_API,
+    "PVL_fal_SeeDream4_API": PVL_fal_SeeDream4_API,
+    "PVL_fal_QwenImage_API": PVL_fal_QwenImage_API,
+    "PVL_fal_FluxPulid": PVL_fal_FluxPulid,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -89,4 +95,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Crop2AR": "PVL Crop to Aspect Ratio",
     "PVL_StylePicker": "PVL StylePicker",
     "PVL_Google_NanoBanana_API": "PVL Google NanoBanana API",
+    "PVL_fal_SeeDream4_API": "FAL SeeDream4 Edit (fal.ai)",
+    "PVL_fal_QwenImage_API": "PVL QwenImage txt2img (fal.ai)",
+    "PVL_fal_FluxPulid": "PVL Flux PuLID (fal.ai)",
 }

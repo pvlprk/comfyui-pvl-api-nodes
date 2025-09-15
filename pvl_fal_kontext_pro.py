@@ -32,7 +32,7 @@ class PVL_fal_KontextPro_API:
     def edit_image(self, prompt, image, seed, CFG, num_images, output_format, 
                   sync_mode, safety_tolerance, aspect_ratio):
         # Upload the input image to get a URL
-        image_url = ImageUtils.upload_image(image)
+        image_url = ImageUtils.image_to_data_uri(image)
         if not image_url:
             self._raise("FAL: failed to upload input image.")
 

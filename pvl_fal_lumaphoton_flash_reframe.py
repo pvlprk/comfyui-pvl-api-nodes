@@ -34,7 +34,7 @@ class PVL_fal_LumaPhoton_FlashReframe_API:
     def reframe_image(self, image, aspect_ratio, prompt="", grid_position_x=-1, 
                      grid_position_y=-1, x_start=-1, x_end=-1, y_start=-1, y_end=-1):
         # Upload the input image to get a URL
-        image_url = ImageUtils.upload_image(image)
+        image_url = ImageUtils.image_to_data_uri(image)
         if not image_url:
             self._raise("FAL: failed to upload input image.")
 

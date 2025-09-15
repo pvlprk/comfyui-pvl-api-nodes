@@ -43,19 +43,19 @@ class PVL_fal_KontextDevInpaint_API:
                 lora3_name="", lora3_scale=1.0):
         try:
             # Upload the input image to get a URL
-            image_url = ImageUtils.upload_image(image)
+            image_url = ImageUtils.image_to_data_uri(image)
             if not image_url:
                 raise Exception("Failed to upload image")
             
             # Upload the mask to get a URL
-            mask_url = ImageUtils.upload_image(ImageUtils.mask_to_image(mask))
+            mask_url = ImageUtils.image_to_data_uri(ImageUtils.mask_to_image(mask))
             if not mask_url:
                 raise Exception("Failed to upload mask")
             
             # Upload the reference image if provided
             reference_image_url = None
             if reference_image is not None:
-                reference_image_url = ImageUtils.upload_image(reference_image)
+                reference_image_url = ImageUtils.image_to_data_uri(reference_image)
                 if not reference_image_url:
                     raise Exception("Failed to upload reference image")
             

@@ -37,7 +37,7 @@ class PVL_fal_Kontext_Dev_API:
                   num_images, output_format, sync_mode, acceleration, resolution_mode, 
                   enable_safety_checker=True):
         # Upload the input image to get a URL
-        image_url = ImageUtils.upload_image(image)
+        image_url = ImageUtils.image_to_data_uri(image)
         if not image_url:
             self._raise("FAL: failed to upload input image.")
 

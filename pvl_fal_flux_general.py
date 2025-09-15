@@ -92,7 +92,7 @@ class PVL_fal_FluxGeneral_API:
             
             # Handle reference image if provided
             if reference_image is not None:
-                reference_image_url = ImageUtils.upload_image(reference_image)
+                reference_image_url = ImageUtils.image_to_data_uri(reference_image)
                 if reference_image_url:
                     arguments["reference_image_url"] = reference_image_url
                     arguments["reference_strength"] = reference_strength

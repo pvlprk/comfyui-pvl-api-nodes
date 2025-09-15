@@ -67,7 +67,7 @@ class PVL_fal_FluxPro_Fill_API:
     def fill_image(self, prompt, image, mask, seed, num_images, output_format, 
                   sync_mode, safety_tolerance):
         # Upload the input image to get a URL
-        image_url = ImageUtils.upload_image(image)
+        image_url = ImageUtils.image_to_data_uri(image)
         if not image_url:
             self._raise("FAL: failed to upload input image.")
 

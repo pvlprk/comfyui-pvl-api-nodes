@@ -58,7 +58,7 @@ class PVL_fal_KontextMaxMulti_API:
         image_urls = []
         for i, img in enumerate([image_1, image_2, image_3, image_4], 1):
             if img is not None:
-                url = ImageUtils.upload_image(img)
+                url = ImageUtils.image_to_data_uri(img)
                 if url:
                     image_urls.append(url)
                 else:
