@@ -2,7 +2,7 @@
 # PVL – Image Stitch (ComfyUI custom node)
 #
 # Features:
-# - 1 required image input + up to 4 optional image inputs (total 5).
+# - 1 required image input + up to 7 optional image inputs (total 8).
 # - If only one image provided: passthrough (drop alpha, keep size).
 # - Linear arrangement: right / left / up / down.
 # - Pack-to-square:
@@ -558,7 +558,7 @@ def _paste_absolute(tiles_by_index: dict[int, torch.Tensor], placements: list[tu
 # ComfyUI Node
 # -----------------------------
 class PVL_ImageStitch:
-    """PVL – Image Stitch: stitch up to 5 images either linearly or via pack-to-square."""
+    """PVL – Image Stitch: stitch up to 8 images either linearly or via pack-to-square."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -581,6 +581,9 @@ class PVL_ImageStitch:
                 "image_3": ("IMAGE",),
                 "image_4": ("IMAGE",),
                 "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",),
+                "image_7": ("IMAGE",),
+                "image_8": ("IMAGE",),
             }
         }
 
@@ -627,10 +630,13 @@ class PVL_ImageStitch:
                image_2: torch.Tensor | None = None,
                image_3: torch.Tensor | None = None,
                image_4: torch.Tensor | None = None,
-               image_5: torch.Tensor | None = None):
+               image_5: torch.Tensor | None = None,
+               image_6: torch.Tensor | None = None,
+               image_7: torch.Tensor | None = None,
+               image_8: torch.Tensor | None = None):
 
         # Collect & validate
-        img_list_bhwc = self._validate_and_collect([image_1, image_2, image_3, image_4, image_5])
+        img_list_bhwc = self._validate_and_collect([image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8])
         if len(img_list_bhwc) == 0:
             raise ValueError("pvl_ImageStitch: no valid images provided.")
         if len(img_list_bhwc) == 1:
