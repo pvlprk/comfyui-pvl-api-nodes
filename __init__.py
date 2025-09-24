@@ -30,6 +30,7 @@ from .pvl_google_nano_banana import PVL_Google_NanoBanana_API
 from .pvl_fal_seedream4_edit import PVL_fal_SeeDream4_API
 from .pvl_fal_qwen_txt2img import PVL_fal_QwenImage_API
 from .pvl_fal_flux_pulid import PVL_fal_FluxPulid
+from .pvl_google_nano_banana_multi_img import PVL_Google_NanoBanana_Multi_API
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -64,6 +65,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_SeeDream4_API": PVL_fal_SeeDream4_API,
     "PVL_fal_QwenImage_API": PVL_fal_QwenImage_API,
     "PVL_fal_FluxPulid": PVL_fal_FluxPulid,
+    "PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -98,4 +100,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_SeeDream4_API": "FAL SeeDream4 Edit (fal.ai)",
     "PVL_fal_QwenImage_API": "PVL QwenImage txt2img (fal.ai)",
     "PVL_fal_FluxPulid": "PVL Flux PuLID (fal.ai)",
+    "PVL_Google_NanoBanana_Multi_API": "PVL Google NanoBanana API Multi",
 }
