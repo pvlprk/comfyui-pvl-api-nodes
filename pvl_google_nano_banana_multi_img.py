@@ -11,8 +11,8 @@
 # - num_images supported for Google via parallel calls.
 # - force_fal toggle to always use FAL API.
 # - FAL Queue API integration for robustness.
-# - If images differ in resolution -> return list of tensors.
-# - Ensures IMAGE output is always 4D tensor or list of 4D tensors.
+# - If images differ in resolution -> resize to match first image.
+# - Ensures IMAGE output is always 4D tensor.
 # - Debug mode prints payloads sent to API.
 
 import os, io, json, base64, typing as T, time
@@ -95,7 +95,6 @@ def _extract_text_from_part(part) -> T.Optional[str]:
 def _data_url(mime: str, raw: bytes) -> str:
     return f"data:{mime};base64," + base64.b64encode(raw).decode("utf-8")
 
-
 class PVL_Google_NanoBanana_Multi_API:
     @classmethod
     def INPUT_TYPES(cls):
@@ -153,9 +152,20 @@ class PVL_Google_NanoBanana_Multi_API:
         parts: T.List[dict] = []
         if prompt and prompt.strip():
             parts.append({"text": prompt})
-        for img in image_tensors:
-            pil = tensor_to_pil(img)
-            parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
+        
+        # Process all image tensors
+        for img_tensor in image_tensors:
+            # Handle batched images (4D tensors)
+            if img_tensor.ndim == 4:
+                for i in range(img_tensor.shape[0]):
+                    # Extract single image from batch
+                    single_img = img_tensor[i:i+1]
+                    pil = tensor_to_pil(single_img)
+                    parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
+            else:
+                # Handle single image (3D tensor)
+                pil = tensor_to_pil(img_tensor)
+                parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
         return parts
 
     # --- FAL Queue API ---
@@ -169,15 +179,24 @@ class PVL_Google_NanoBanana_Multi_API:
         # Build data URLs
         data_urls = []
         for t in image_tensors:
-            pil = tensor_to_pil(t)
-            raw = encode_pil_bytes(pil, mime)
-            data_urls.append(_data_url(mime, raw))
+            # Handle batched images
+            if t.ndim == 4:
+                for i in range(t.shape[0]):
+                    single_img = t[i:i+1]
+                    pil = tensor_to_pil(single_img)
+                    raw = encode_pil_bytes(pil, mime)
+                    data_urls.append(_data_url(mime, raw))
+            else:
+                pil = tensor_to_pil(t)
+                raw = encode_pil_bytes(pil, mime)
+                data_urls.append(_data_url(mime, raw))
 
         base = "https://queue.fal.run"
         submit_url = f"{base}/{route.strip()}"
         headers = {"Authorization": f"Key {fal_key}"}
         payload = {
             "prompt": prompt or "",
+            # Use plural image_urls as required by the API
             "image_urls": data_urls,
             "num_images": int(max(1,num_images)),
             "output_format": ("png" if str(output_format).lower()=="png" else "jpeg"),
@@ -213,7 +232,9 @@ class PVL_Google_NanoBanana_Multi_API:
 
         # Collect outputs
         buckets = []
-        resp = rdata.get("response") if isinstance(rdata, dict) else rdata
+        resp = rdata.get("response") if isinstance(rdata, dict) else None
+        if resp is None and isinstance(rdata, dict):
+            resp = rdata
         if isinstance(resp, dict):
             for key in ("images","outputs","artifacts"):
                 val = resp.get(key)
@@ -239,10 +260,23 @@ class PVL_Google_NanoBanana_Multi_API:
                 if debug: print("[FAL decode fail]",ex)
 
         if not out:
+            print("[PVL NODE] FAL returned no images – raw response:", json.dumps(resp, indent=2)[:2000])
             raise RuntimeError("FAL returned no images")
 
-        # return (text, images)
-        return "", (out if len(out)>1 else out[0].unsqueeze(0))
+        # Cap to num_images
+        out = out[:int(max(1, num_images))]
+        
+        # Convert to tensor
+        if len(out) == 1:
+            images_tensor = out[0]
+        else:
+            images_tensor = torch.cat(out, dim=0)
+        
+        # Extract text from response
+        description = resp.get("description") or rdata.get("description") or resp.get("output_text") or ""
+        
+        # Return (image, text) to match single-image version
+        return images_tensor, description
 
     # --- main run ---
     def run(self, prompt: str,
@@ -263,15 +297,19 @@ class PVL_Google_NanoBanana_Multi_API:
         image_tensors=[]
         for img in [image_1,image_2,image_3,image_4,image_5,image_6,image_7,image_8]:
             if img is not None and torch.is_tensor(img):
-                batch = img if img.ndim==4 else img.unsqueeze(0)
-                for j in range(batch.shape[0]):
-                    image_tensors.append(batch[j:j+1])
+                # Keep batch dimension if present
+                image_tensors.append(img)
 
         # ---- CASE: FAL only ----
         if force_fal:
             fal_key = (fal_api_key or os.getenv("FAL_KEY","")).strip()
             if not fal_key: raise RuntimeError("force_fal=True but no FAL_KEY")
-            return self._fal_queue_call(fal_route,prompt,image_tensors,input_mime,fal_key,timeout_sec,debug_log,num_images,output_format)
+            images_tensor, fal_text = self._fal_queue_call(
+                fal_route, prompt, image_tensors, input_mime, 
+                fal_key, timeout_sec, debug_log, num_images, output_format
+            )
+            text_out = fal_text if want_text else ""
+            return text_out, images_tensor
 
         # ---- CASE: Google ----
         if not key:
@@ -326,22 +364,54 @@ class PVL_Google_NanoBanana_Multi_API:
         if not out_imgs:
             if use_fal_fallback:
                 fal_key=(fal_api_key or os.getenv("FAL_KEY","")).strip()
-                return self._fal_queue_call(fal_route,prompt,image_tensors,input_mime,fal_key,timeout_sec,debug_log,num_images,output_format)
+                images_tensor, fal_text = self._fal_queue_call(
+                    fal_route, prompt, image_tensors, input_mime, 
+                    fal_key, timeout_sec, debug_log, num_images, output_format
+                )
+                
+                # Combine Google and FAL text if requested
+                if want_text:
+                    combined_text = ""
+                    if out_texts:
+                        combined_text += "\n\n--- Google ---\n\n" + "\n".join(out_texts)
+                    if fal_text:
+                        combined_text += "\n\n--- FAL ---\n\n" + fal_text
+                    text_out = combined_text
+                else:
+                    text_out = ""
+                    
+                return text_out, images_tensor
             raise RuntimeError("Gemini returned no images")
 
-        # Handle size mismatch: return list if not stackable
+        # Handle size mismatch: resize to first image size
         if len(out_imgs) > 1:
             try:
                 images_tensor = torch.cat(out_imgs,dim=0)
             except RuntimeError:
-                if debug_log: print("[GOOGLE] Mismatched sizes, returning list of tensors")
-                images_tensor = out_imgs
+                if debug_log: 
+                    print("[GOOGLE] Mismatched sizes, resizing to match first image")
+                
+                # Resize all images to match the first image's dimensions
+                target_size = out_imgs[0].shape[1:3]  # (H, W)
+                resized_imgs = []
+                
+                for img in out_imgs:
+                    pil = tensor_to_pil(img)
+                    resized_pil = pil.resize((target_size[1], target_size[0]), Image.LANCZOS)
+                    resized_imgs.append(pil_to_tensor(resized_pil))
+                
+                images_tensor = torch.cat(resized_imgs, dim=0)
         else:
             images_tensor = out_imgs[0]
             if images_tensor.ndim == 3:
                 images_tensor = images_tensor.unsqueeze(0)
 
         text_out="\n".join(out_texts) if (want_text and out_texts) else ""
+        
+        # Print text output if present
+        if text_out:
+            print(f"[PVL Google NanoBanana Output]:\n{text_out}\n")
+            
         return text_out, images_tensor
 
 NODE_CLASS_MAPPINGS={"PVL_Google_NanoBanana_Multi_API":PVL_Google_NanoBanana_Multi_API}
