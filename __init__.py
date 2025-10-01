@@ -37,6 +37,7 @@ from .pvl_boolean_logic import PVL_BooleanLogic
 from .pvl_any2string import PVL_Any2String
 from .pvl_fal_remove_bg_v2 import PVL_fal_RemoveBackground_API
 from .pvl_fal_depth_anything_v2 import PVL_fal_DepthAnythingV2_API
+from .pvl_google_nano_banana_mandatory_img import PVL_Google_NanoBanana_API_mandatory_IMG
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -78,6 +79,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Any2String": PVL_Any2String,
     "PVL_fal_RemoveBackground_API": PVL_fal_RemoveBackground_API,
     "PVL_fal_DepthAnythingV2_API": PVL_fal_DepthAnythingV2_API,
+    "PVL_Google_NanoBanana_API_mandatory_IMG": PVL_Google_NanoBanana_API_mandatory_IMG,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -119,4 +121,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Any2String": "PVL Any To String",
     "PVL_fal_RemoveBackground_API": "PVL Remove Background V2 (fal.ai)",
     "PVL_fal_DepthAnythingV2_API": "PVL Depth Anything V2 (fal.ai)",
+    "PVL_Google_NanoBanana_API_mandatory_IMG": "PVL Google Nano-Banana API mandatory IMG",
 }
