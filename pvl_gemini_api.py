@@ -1,44 +1,44 @@
 # pvl_gemini_api.py
-# PVL - Gemini Api (Google Developer API), **hard-coded model list**, no live fetch.
-# - Inputs: instructions (optional), prompt (optional), image (optional)
-# - Models: gemini-2.5-pro / -2.5-flash / -2.5-flash-lite / -2.0-flash / -1.5-pro / -1.5-flash
-# - generationConfig: temperature, topP, topK
-# - Retries, timeout, debug logging
-# - API key via input or GEMINI_API_KEY env
+# PVL - Gemini Api (Google Developer API), simplified & hardened
 #
-# API contract per docs:
-#   Primary: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-#   Fallback: retry once against /v1/ only on HTTP 404
-#   System prompt field: "system_instruction" (snake_case)
+# - Hard-coded supported models (no deprecated 1.5 family):
+#     gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.0-flash
+# - API call strategy:
+#     POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+#     If HTTP 404, retry once with /v1/
+# - System prompt field:
+#     send "system_instruction"; if server rejects, retry same endpoint once with "systemInstruction"
 #
-# References:
-#   - Generate Content endpoint + examples: ai.google.dev/api/generate-content
-#   - Model catalogue & IDs: ai.google.dev/gemini-api/docs/models
+# Inputs:
+#   instructions (optional), prompt (optional), image (optional),
+#   model (dropdown), tries (default 2), timeout (default 45),
+#   temperature, top_p, top_k, debug, api_key (optional, else GEMINI_API_KEY)
+#
+# Output:
+#   text (STRING)
 
 import os, io, time, base64, json
-from typing import List, Tuple, Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from PIL import Image
 
 try:
-    import torch, numpy as np
+    import torch, numpy as np  # for ComfyUI tensors
 except Exception:
     torch = None
     np = None
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com"
-PRIMARY_VER = "v1beta"   # default per docs
-FALLBACK_VER = "v1"      # only if 404 at endpoint
+PRIMARY_VER = "v1beta"
+FALLBACK_VER = "v1"
 
-# ---- Hard-coded stable model list (text-only & multimodal) ----
+# ---- Supported models only ----
 HARDCODED_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
 ]
 
 def _log_debug(debug: bool, *args):
@@ -71,65 +71,62 @@ def _tensor_to_pil_first(image_tensor: Any) -> Optional[Image.Image]:
         arr = arr[0]
     if arr.ndim != 3 or arr.shape[2] not in (1, 3, 4):
         return None
-    arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+    arr = (arr * 255.0).clip(0, 255).astype("uint8")
     if arr.shape[2] == 1:
         arr = arr[:, :, 0]
     return Image.fromarray(arr)
 
-def _b64_from_pil(pil_img: Image.Image, mime: str = "image/png") -> Tuple[str, str]:
+def _b64_from_pil(pil_img: Image.Image, mime: str = "image/png") -> str:
     buf = io.BytesIO()
-    fmt = "PNG" if mime == "image/png" else "JPEG"
-    pil_img.save(buf, format=fmt)
-    data = base64.b64encode(buf.getvalue()).decode("ascii")
-    return data, mime
+    pil_img.save(buf, format="PNG" if mime == "image/png" else "JPEG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
-def _build_contents(prompt: Optional[str], pil_img: Optional[Image.Image]) -> List[Dict[str, Any]]:
+def _build_contents(prompt: Optional[str], pil_img: Optional[Image.Image]) -> list:
     parts = []
     if prompt and str(prompt).strip():
         parts.append({"text": str(prompt)})
     if pil_img is not None:
-        b64, mime = _b64_from_pil(pil_img, mime="image/png")
-        parts.append({"inline_data": {"mime_type": "image/png", "data": b64}})
-    # Ensure at least one Part so request is valid if only system instruction is sent
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/png",
+                "data": _b64_from_pil(pil_img, mime="image/png")
+            }
+        })
     if not parts:
-        parts = [{"text": ""}]
+        parts = [{"text": ""}]  # ensure at least one part if only instructions are provided
     return [{"role": "user", "parts": parts}]
 
-def _extract_text(response_json: Dict[str, Any]) -> str:
-    cands = response_json.get("candidates") or []
+def _extract_text(resp_json: Dict[str, Any]) -> str:
+    cands = resp_json.get("candidates") or []
     if not cands:
-        pf = response_json.get("promptFeedback") or {}
-        br = (pf.get("blockReason") or pf.get("block_reason") or "")
-        return f"[Gemini] No candidates returned{f' (blocked: {br})' if br else ''}."
-    content = (cands[0] or {}).get("content") or {}
-    parts = content.get("parts") or []
-    out = []
-    for p in parts:
-        if "text" in p:
-            out.append(p["text"])
-    return "".join(out).strip()
+        fb = resp_json.get("promptFeedback") or {}
+        br = fb.get("blockReason") or fb.get("block_reason") or ""
+        return f"[Gemini] No candidates returned{(' (blocked: ' + br + ')') if br else ''}."
+    parts = (cands[0] or {}).get("content", {}).get("parts", []) or []
+    out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    return out.strip()
 
 def _gen_url(model: str, api_version: str) -> str:
     model_path = model if model.startswith("models/") else f"models/{model}"
     return f"{GEMINI_BASE}/{api_version}/{model_path}:generateContent"
 
-def _request_once(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: bool) -> requests.Response:
+def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: bool, note: str) -> requests.Response:
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
     if debug:
-        sanitized = json.loads(json.dumps(payload))
-        for msg in sanitized.get("contents", []):
+        san = json.loads(json.dumps(payload))
+        for msg in san.get("contents", []):
             for part in msg.get("parts", []):
                 if "inline_data" in part and "data" in part["inline_data"]:
                     part["inline_data"]["data"] = f"<{len(part['inline_data']['data'])} base64 bytes>"
-        _log_debug(debug, f"POST {url}")
-        _log_debug(debug, "Request JSON:", json.dumps(sanitized, ensure_ascii=False)[:10000])
+        _log_debug(debug, f"POST {url} ({note})")
+        _log_debug(debug, "Request JSON:", json.dumps(san, ensure_ascii=False)[:10000])
     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
     if debug:
         _log_debug(debug, f"HTTP {resp.status_code}")
         _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
     return resp
 
-def _generate_with_retries(
+def _generate(
     api_key: str,
     model: str,
     instructions: Optional[str],
@@ -140,71 +137,61 @@ def _generate_with_retries(
     temperature: float,
     top_p: float,
     top_k: int,
-    debug: bool
+    debug: bool,
 ) -> Tuple[bool, str]:
+    # build body
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
-    gen_cfg: Dict[str, Any] = {}
-    if temperature is not None:
-        gen_cfg["temperature"] = float(temperature)
+    gen_cfg: Dict[str, Any] = {"temperature": float(temperature)}
     if isinstance(top_p, (int, float)) and top_p > 0:
         gen_cfg["topP"] = float(top_p)
     if isinstance(top_k, int) and top_k > 0:
         gen_cfg["topK"] = int(top_k)
 
-    payload: Dict[str, Any] = {"contents": contents}
-    if sys_instr is not None:
-        # Per docs, prefer snake_case in REST examples; works across versions.
-        payload["system_instruction"] = sys_instr
-    if gen_cfg:
-        payload["generationConfig"] = gen_cfg
+    base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
     last_err = ""
+
+    def try_one_endpoint(api_ver: str) -> Tuple[bool, str, Optional[int]]:
+        url = _gen_url(model, api_ver)
+
+        # 1) system_instruction
+        payload = json.loads(json.dumps(base_payload))
+        if sys_instr is not None:
+            payload["system_instruction"] = sys_instr
+        resp = _post(url, payload, api_key, timeout, debug, "system_instruction")
+        if resp.status_code == 200:
+            data = resp.json()
+            return True, _extract_text(data), 200
+        if resp.status_code == 404:
+            return False, f"HTTP 404 at {url}: {resp.text[:600]}", 404
+        if resp.status_code == 400 and ("system_instruction" in resp.text):
+            # 2) retry with systemInstruction
+            payload2 = json.loads(json.dumps(base_payload))
+            if sys_instr is not None:
+                payload2["systemInstruction"] = sys_instr
+            resp2 = _post(url, payload2, api_key, timeout, debug, "systemInstruction")
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                return True, _extract_text(data2), 200
+            return False, f"HTTP {resp2.status_code} at {url}: {resp2.text[:1000]}", resp2.status_code
+
+        # other errors
+        return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+
     for attempt in range(1, max(1, tries) + 1):
-        url_beta = _gen_url(model, PRIMARY_VER)
-        try:
-            resp = _request_once(url_beta, payload, api_key, timeout, debug)
-            if resp.status_code == 200:
-                data = resp.json()
-                um = data.get("usageMetadata") or data.get("usage_metadata")
-                if debug and um:
-                    _log_debug(debug, f"usageMetadata: {json.dumps(um)}")
-                return True, _extract_text(data)
-
-            # If endpoint not found (rare), try v1 once.
-            if resp.status_code == 404:
-                url_v1 = _gen_url(model, FALLBACK_VER)
-                _log_debug(debug, f"404 on {url_beta}. Retrying once with {url_v1} ...")
-                resp2 = _request_once(url_v1, payload, api_key, timeout, debug)
-                if resp2.status_code == 200:
-                    data = resp2.json()
-                    um = data.get("usageMetadata") or data.get("usage_metadata")
-                    if debug and um:
-                        _log_debug(debug, f"usageMetadata: {json.dumps(um)}")
-                    return True, _extract_text(data)
-                resp = resp2  # analyze below
-
-            if resp.status_code in (429, 500, 502, 503, 504):
-                last_err = f"HTTP {resp.status_code} at {resp.request.url}: {resp.text[:600]}"
-                _log_debug(debug, f"Retryable error attempt {attempt}: {last_err}")
-                time.sleep(min(2 * attempt, 6))
-                continue
-
-            last_err = f"HTTP {resp.status_code} at {resp.request.url}: {resp.text[:1000]}"
-            _log_debug(debug, f"Non-retryable: {last_err}")
-            return False, last_err
-
-        except requests.Timeout:
-            last_err = f"Timeout after {timeout}s at {url_beta}"
-            _log_debug(debug, f"Timeout attempt {attempt}: {last_err}")
-            time.sleep(min(2 * attempt, 6))
-            continue
-        except Exception as e:
-            last_err = f"Exception at {url_beta}: {e}"
-            _log_debug(debug, f"Exception attempt {attempt}: {last_err}")
-            time.sleep(min(2 * attempt, 6))
-            continue
+        ok, res, code = try_one_endpoint(PRIMARY_VER)
+        if ok:
+            return True, res
+        last_err = res
+        # Only if endpoint truly missing, try v1 once
+        if code == 404:
+            ok2, res2, _ = try_one_endpoint(FALLBACK_VER)
+            if ok2:
+                return True, res2
+            last_err = res2
+        time.sleep(min(2 * attempt, 6))
 
     return False, last_err or "Unknown error"
 
@@ -212,21 +199,21 @@ class PVL_Gemini_API:
     """
     PVL - Gemini Api
       - instructions (optional), prompt (optional), image (optional)
-      - models: hard-coded list (1.5 / 2.0 / 2.5 ; pro / flash / flash-lite)
+      - models: 2.5-pro / 2.5-flash / 2.5-flash-lite / 2.0-flash
       - generationConfig: temperature, topP, topK
       - retries / timeout / debug logging
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_model = "gemini-2.5-flash" if "gemini-2.5-flash" in HARDCODED_MODELS else HARDCODED_MODELS[0]
+        default_model = "gemini-2.5-flash"
         return {
             "required": {
                 "model": (HARDCODED_MODELS, {"default": default_model}),
                 "tries": ("INT", {"default": 2, "min": 1, "max": 10}),
                 "timeout": ("INT", {"default": 45, "min": 1, "max": 600}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),  # 0.0 => omit
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),  # 0 => omit
                 "top_k": ("INT", {"default": 40, "min": 0, "max": 100}),                    # 0 => omit
                 "debug": ("BOOLEAN", {"default": False}),
             },
@@ -270,11 +257,11 @@ class PVL_Gemini_API:
         if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
             raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
 
-        ok, result = _generate_with_retries(
+        ok, result = _generate(
             api_key=key,
             model=model,
             instructions=instructions or "",
-            prompt=(prompt or ""),
+            prompt=prompt or "",
             pil_img=pil_img,
             tries=tries,
             timeout=timeout,

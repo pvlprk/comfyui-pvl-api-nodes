@@ -17,6 +17,7 @@ logger.setLevel(logging.INFO)
 
 SUPPORTED_MODELS = ["gpt-4", "gpt-4.1", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
 
+
 def retry_request(max_retries=3, initial_delay=1, backoff_factor=2, debug=False):
     """Decorator factory for retrying API requests with exponential backoff."""
     def decorator(func):
@@ -26,15 +27,11 @@ def retry_request(max_retries=3, initial_delay=1, backoff_factor=2, debug=False)
             while retry_count < max_retries:
                 try:
                     return func(*args, **kwargs)
-                except (openai.APIError,
-                        openai.APITimeoutError,
-                        openai.BadRequestError,
-                        openai.RateLimitError,
-                        Exception) as e:
+                except (openai.OpenAIError, Exception) as e:
                     retry_count += 1
                     if retry_count == max_retries:
                         logger.error(f"Max retries exceeded for {func.__name__}: {str(e)}")
-                        raise RuntimeError(f"Max retries exceeded: {str(e)}")
+                        raise
                     if debug:
                         logger.warning(f"Retry {retry_count}/{max_retries} after error: {str(e)}")
                     time.sleep(delay)
@@ -65,8 +62,8 @@ class CallAssistantNode:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("assistant_response",)
+    RETURN_TYPES = ("STRING", "BOOLEAN",)
+    RETURN_NAMES = ("assistant_response", "error",)
     FUNCTION = "call_assistant"
     CATEGORY = "PVL_tools"
 
@@ -111,100 +108,132 @@ class CallAssistantNode:
     def call_assistant(self, assistant_id, seed, model, reasoning_effort,
                        retry_count, timeout_seconds, debug,
                        api_key="", input_text="", image=None):
+
         debug_mode = (debug == "on")
         if debug_mode:
             self.enable_debug_logging()
 
-        api_key = self.get_api_key(api_key, debug_mode)
-        openai.api_key = api_key
+        try:
+            api_key = self.get_api_key(api_key, debug_mode)
+            openai.api_key = api_key
 
-        if not assistant_id.strip():
-            raise RuntimeError("Error: Assistant ID is required.")
+            if not assistant_id.strip():
+                raise RuntimeError("Error: Assistant ID is required.")
 
-        if debug_mode:
-            logger.debug(f"Calling assistant {assistant_id} with model {model}")
-
-        # Wrap API calls with retry
-        decorator = retry_request(max_retries=retry_count, debug=debug_mode)
-
-        @decorator
-        def create_thread():
-            return openai.beta.threads.create()
-
-        @decorator
-        def create_message(**kwargs):
-            return openai.beta.threads.messages.create(**kwargs)
-
-        @decorator
-        def create_run(**kwargs):
-            return openai.beta.threads.runs.create(**kwargs)
-
-        @decorator
-        def retrieve_run(thread_id, run_id):
-            return openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
-
-        @decorator
-        def list_messages(thread_id):
-            return openai.beta.threads.messages.list(thread_id=thread_id)
-
-        # Create thread
-        thread = create_thread()
-
-        # Track if any messages created
-        messages_created = False
-
-        if input_text.strip():
-            create_message(
-                thread_id=thread.id,
-                role="user",
-                content=input_text.strip(),
-                metadata={"seed": str(seed), "model": model}
-            )
-            messages_created = True
             if debug_mode:
-                logger.debug(f"Input tokens: {self.estimate_tokens(input_text, model)}")
+                logger.debug(f"Calling assistant {assistant_id} with model {model}")
 
-        if image is not None:
-            file_id = self.upload_image(api_key, image, retry_count, debug_mode)
-            create_message(
-                thread_id=thread.id,
-                role="user",
-                content=[{"type": "image_file", "image_file": {"file_id": file_id}}],
-            )
-            messages_created = True
+            # Wrap API calls with retry
+            decorator = retry_request(max_retries=retry_count, debug=debug_mode)
 
-        if not messages_created:
-            raise RuntimeError("Error: No content provided (text or image).")
+            @decorator
+            def create_thread():
+                return openai.beta.threads.create()
 
-        run_args = {"thread_id": thread.id, "assistant_id": assistant_id, "model": model}
-        if reasoning_effort != "disabled":
-            run_args["reasoning_effort"] = reasoning_effort
+            @decorator
+            def create_message(**kwargs):
+                return openai.beta.threads.messages.create(**kwargs)
 
-        run = create_run(**run_args)
+            @decorator
+            def create_run(**kwargs):
+                return openai.beta.threads.runs.create(**kwargs)
 
-        start_time = time.time()
-        while True:
-            run = retrieve_run(thread.id, run.id)
-            if run.status == "completed":
-                break
-            elif run.status in ["failed", "expired", "cancelled"]:
-                raise RuntimeError(f"Assistant run {run.status}: {getattr(run, 'last_error', '')}")
-            if time.time() - start_time > timeout_seconds:
-                raise RuntimeError(f"Assistant run timed out after {timeout_seconds} seconds")
-            time.sleep(1)
+            @decorator
+            def retrieve_run(thread_id, run_id):
+                return openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
 
-        messages = list_messages(thread.id)
-        if not messages.data:
-            raise RuntimeError("Error: No messages found in thread.")
+            @decorator
+            def list_messages(thread_id):
+                return openai.beta.threads.messages.list(thread_id=thread_id)
 
-        last_message = messages.data[0]
-        if not last_message.content:
-            raise RuntimeError("Error: Assistant returned empty content.")
+            # Create thread
+            thread = create_thread()
+            messages_created = False
 
-        response_text = last_message.content[0].text.value
-        if debug_mode:
-            logger.debug(f"Output tokens: {self.estimate_tokens(response_text, model)}")
-        return (response_text,)
+            input_tokens = 0
+            if input_text.strip():
+                create_message(
+                    thread_id=thread.id,
+                    role="user",
+                    content=input_text.strip(),
+                    metadata={"seed": str(seed), "model": model}
+                )
+                messages_created = True
+                input_tokens = self.estimate_tokens(input_text, model)
+                if debug_mode:
+                    logger.debug(f"Input tokens estimated: {input_tokens}")
+
+            if image is not None:
+                file_id = self.upload_image(api_key, image, retry_count, debug_mode)
+                create_message(
+                    thread_id=thread.id,
+                    role="user",
+                    content=[{"type": "image_file", "image_file": {"file_id": file_id}}],
+                )
+                messages_created = True
+                if debug_mode:
+                    logger.debug("Image uploaded and attached to thread.")
+
+            if not messages_created:
+                raise RuntimeError("Error: No content provided (text or image).")
+
+            run_args = {"thread_id": thread.id, "assistant_id": assistant_id, "model": model}
+            if reasoning_effort != "disabled":
+                run_args["reasoning_effort"] = reasoning_effort
+
+            @decorator
+            def run_and_wait(**kwargs):
+                run = create_run(**kwargs)
+                start_time = time.time()
+                if debug_mode:
+                    logger.debug(f"Run {run.id} started, polling for completion...")
+                while True:
+                    r = retrieve_run(kwargs["thread_id"], run.id)
+
+                    if r.status == "completed":
+                        if debug_mode:
+                            logger.debug(f"Run {r.id} completed successfully.")
+                        return r
+
+                    if r.status in ["failed", "expired", "cancelled", "incomplete"]:
+                        raise RuntimeError(f"Run ended with status {r.status}, error: {getattr(r, 'last_error', None)}")
+
+                    if r.status == "requires_action":
+                        raise RuntimeError("Run requires action (tool calls) which is not supported")
+
+                    if time.time() - start_time > timeout_seconds:
+                        raise RuntimeError(f"Assistant run timed out after {timeout_seconds} seconds")
+
+                    time.sleep(1)
+
+            run = run_and_wait(**run_args)
+
+            messages = list_messages(thread.id)
+            if not messages or not getattr(messages, "data", None):
+                raise RuntimeError("No messages returned")
+
+            last_message = messages.data[0]
+            if not last_message.content:
+                raise RuntimeError("Message has no content")
+
+            text_block = getattr(last_message.content[0], "text", None)
+            if not text_block or not getattr(text_block, "value", None):
+                raise RuntimeError("Message text content missing")
+
+            response_text = text_block.value
+            output_tokens = self.estimate_tokens(response_text, model)
+            total_tokens = input_tokens + output_tokens
+
+            if debug_mode:
+                logger.debug(f"Output tokens estimated: {output_tokens}")
+                logger.debug(f"Total tokens estimated: {total_tokens}")
+
+            return (response_text, True)
+
+        except Exception as e:
+            if debug_mode:
+                logger.error(f"CallAssistantNode error: {e}")
+            return ("", False)
 
     def upload_image(self, api_key, image_tensor, retry_count=3, debug=False):
         decorator = retry_request(max_retries=retry_count, debug=debug)
