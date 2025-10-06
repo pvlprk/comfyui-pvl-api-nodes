@@ -1,30 +1,16 @@
 # pvl_gemini_api.py
-# PVL - Gemini Api (Google Developer API), simplified & hardened
-#
-# - Hard-coded supported models (no deprecated 1.5 family):
-#     gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.0-flash
-# - API call strategy:
-#     POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-#     If HTTP 404, retry once with /v1/
-# - System prompt field:
-#     send "system_instruction"; if server rejects, retry same endpoint once with "systemInstruction"
-#
-# Inputs:
-#   instructions (optional), prompt (optional), image (optional),
-#   model (dropdown), tries (default 2), timeout (default 45),
-#   temperature, top_p, top_k, debug, api_key (optional, else GEMINI_API_KEY)
-#
-# Output:
-#   text (STRING)
+# PVL - Gemini API (Google Developer API)
+# Supports: batch parallel calls, delimiter output, optional "(variation N)" suffix toggle.
+# Prints total execution time always, even when debug is off.
 
 import os, io, time, base64, json
-from typing import Any, Dict, Optional, Tuple
-
+from typing import Any, Dict, Optional, Tuple, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from PIL import Image
 
 try:
-    import torch, numpy as np  # for ComfyUI tensors
+    import torch, numpy as np
 except Exception:
     torch = None
     np = None
@@ -33,7 +19,6 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com"
 PRIMARY_VER = "v1beta"
 FALLBACK_VER = "v1"
 
-# ---- Supported models only ----
 HARDCODED_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
@@ -51,7 +36,6 @@ def _get_api_key(provided: str) -> str:
     return os.getenv("GEMINI_API_KEY", "").strip()
 
 def _tensor_to_pil_first(image_tensor: Any) -> Optional[Image.Image]:
-    """ComfyUI IMAGE tensor/list -> PIL (first frame)."""
     if image_tensor is None:
         return None
     if isinstance(image_tensor, Image.Image):
@@ -93,7 +77,7 @@ def _build_contents(prompt: Optional[str], pil_img: Optional[Image.Image]) -> li
             }
         })
     if not parts:
-        parts = [{"text": ""}]  # ensure at least one part if only instructions are provided
+        parts = [{"text": ""}]
     return [{"role": "user", "parts": parts}]
 
 def _extract_text(resp_json: Dict[str, Any]) -> str:
@@ -126,20 +110,9 @@ def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: 
         _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
     return resp
 
-def _generate(
-    api_key: str,
-    model: str,
-    instructions: Optional[str],
-    prompt: Optional[str],
-    pil_img: Optional[Image.Image],
-    tries: int,
-    timeout: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-    debug: bool,
-) -> Tuple[bool, str]:
-    # build body
+def _generate(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
+              pil_img: Optional[Image.Image], tries: int, timeout: int, temperature: float,
+              top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
@@ -151,12 +124,8 @@ def _generate(
 
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
-    last_err = ""
-
     def try_one_endpoint(api_ver: str) -> Tuple[bool, str, Optional[int]]:
         url = _gen_url(model, api_ver)
-
-        # 1) system_instruction
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
             payload["system_instruction"] = sys_instr
@@ -167,7 +136,6 @@ def _generate(
         if resp.status_code == 404:
             return False, f"HTTP 404 at {url}: {resp.text[:600]}", 404
         if resp.status_code == 400 and ("system_instruction" in resp.text):
-            # 2) retry with systemInstruction
             payload2 = json.loads(json.dumps(base_payload))
             if sys_instr is not None:
                 payload2["systemInstruction"] = sys_instr
@@ -176,16 +144,14 @@ def _generate(
                 data2 = resp2.json()
                 return True, _extract_text(data2), 200
             return False, f"HTTP {resp2.status_code} at {url}: {resp2.text[:1000]}", resp2.status_code
-
-        # other errors
         return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
 
+    last_err = ""
     for attempt in range(1, max(1, tries) + 1):
         ok, res, code = try_one_endpoint(PRIMARY_VER)
         if ok:
             return True, res
         last_err = res
-        # Only if endpoint truly missing, try v1 once
         if code == 404:
             ok2, res2, _ = try_one_endpoint(FALLBACK_VER)
             if ok2:
@@ -195,14 +161,9 @@ def _generate(
 
     return False, last_err or "Unknown error"
 
+
 class PVL_Gemini_API:
-    """
-    PVL - Gemini Api
-      - instructions (optional), prompt (optional), image (optional)
-      - models: 2.5-pro / 2.5-flash / 2.5-flash-lite / 2.0-flash
-      - generationConfig: temperature, topP, topK
-      - retries / timeout / debug logging
-    """
+    """PVL Gemini API with batch, delimiter, '(variation N)' suffix toggle, and time logging."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -213,8 +174,11 @@ class PVL_Gemini_API:
                 "tries": ("INT", {"default": 2, "min": 1, "max": 10}),
                 "timeout": ("INT", {"default": 45, "min": 1, "max": 600}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),  # 0 => omit
-                "top_k": ("INT", {"default": 40, "min": 0, "max": 100}),                    # 0 => omit
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "top_k": ("INT", {"default": 40, "min": 0, "max": 100}),
+                "batch": ("INT", {"default": 1, "min": 1, "max": 10}),
+                "delimiter": ("STRING", {"default": "\\n-----\\n", "multiline": False}),
+                "append_variation_tag": ("BOOLEAN", {"default": True}),
                 "debug": ("BOOLEAN", {"default": False}),
             },
             "optional": {
@@ -230,25 +194,17 @@ class PVL_Gemini_API:
     FUNCTION = "run"
     CATEGORY = "PVL/LLM"
 
-    def run(
-        self,
-        model: str,
-        tries: int,
-        timeout: int,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        debug: bool,
-        instructions: Optional[str] = "",
-        prompt: Optional[str] = "",
-        image: Any = None,
-        api_key: str = "",
-    ):
+    def run(self, model: str, tries: int, timeout: int, temperature: float,
+            top_p: float, top_k: int, batch: int, delimiter: str,
+            append_variation_tag: bool, debug: bool,
+            instructions: Optional[str] = "", prompt: Optional[str] = "",
+            image: Any = None, api_key: str = ""):
+
+        start_time = time.time()  # <-- Start timer
+
         key = _get_api_key(api_key)
         if not key:
-            msg = ("[Gemini] Missing API key. Provide 'api_key' input or set GEMINI_API_KEY.")
-            _log_debug(True, msg)
-            raise RuntimeError(msg)
+            raise RuntimeError("Missing API key. Provide 'api_key' or set GEMINI_API_KEY.")
 
         pil_img = _tensor_to_pil_first(image) if image is not None else None
         if pil_img is None and image is not None and debug:
@@ -257,22 +213,36 @@ class PVL_Gemini_API:
         if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
             raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
 
-        ok, result = _generate(
-            api_key=key,
-            model=model,
-            instructions=instructions or "",
-            prompt=prompt or "",
-            pil_img=pil_img,
-            tries=tries,
-            timeout=timeout,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            debug=debug,
-        )
-        if not ok:
-            raise RuntimeError(f"Gemini error: {result}")
-        return (result,)
+        def single_call(i: int):
+            prompt_variant = (
+                f"{prompt.rstrip()}\n-----\nVariation {i}"
+                if append_variation_tag and batch > 1 and prompt.strip()
+                else prompt
+            )
+            ok, result = _generate(
+                api_key=key, model=model, instructions=instructions or "",
+                prompt=prompt_variant or "", pil_img=pil_img, tries=tries,
+                timeout=timeout, temperature=temperature,
+                top_p=top_p, top_k=top_k, debug=debug
+            )
+            if not ok:
+                return f"[Error {i}] {result}"
+            return result.strip()
+
+        results: List[str] = []
+        with ThreadPoolExecutor(max_workers=min(batch, 8)) as ex:
+            futs = [ex.submit(single_call, i + 1) for i in range(batch)]
+            for fut in as_completed(futs):
+                results.append(fut.result())
+
+        combined = f" {delimiter} ".join(results)
+
+        # --- Time reporting ---
+        elapsed = time.time() - start_time
+        print(f"[PVL_GEMINI] Completed in {elapsed:.2f} seconds (batch={batch})")
+
+        return (combined,)
+
 
 NODE_CLASS_MAPPINGS = {"PVL_Gemini_API": PVL_Gemini_API}
 NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API": "PVL - Gemini Api"}

@@ -28,6 +28,7 @@ DEFAULT_MODEL = "gemini-2.5-flash-image-preview"
 _TOP_P = 0.95
 _TOP_K = 64
 _MAX_TOKENS = 4096
+_VALID_ASPECTS = {"21:9","1:1","4:3","3:2","2:3","5:4","4:5","3:4","16:9","9:16"}
 
 # --- image helpers ---
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
@@ -116,6 +117,8 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 "request_id": ("STRING", {"default": ""}),
                 "debug_log": ("BOOLEAN", {"default": False}),
 
+                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2 — works for both Google & FAL"}),
+
                 # --- FAL fallback ---
                 "use_fal_fallback": ("BOOLEAN", {"default": False}),
                 "fal_api_key": ("STRING", {"default": "", "multiline": False,
@@ -161,7 +164,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
         return parts
 
-    def _build_config(self, temperature: float, want_text: bool):
+    def _build_config(self, temperature: float, want_text: bool, aspect_ratio: str = "1:1"):
         try:
             from google.genai import types
             cfg = types.GenerateContentConfig(
@@ -170,6 +173,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 top_k=int(_TOP_K),
                 max_output_tokens=int(_MAX_TOKENS),
                 response_modalities=["IMAGE","TEXT"] if want_text else ["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
                 safety_settings=[
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -267,6 +271,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
             "num_images": int(max(1, num_images)),
             "output_format": ("png" if str(output_format).lower()=="png" else "jpeg"),
             "sync_mode": True,
+            "aspect_ratio": aspect_ratio,
         }
         if debug:
             print(f"[PVL FAL] QUEUE SUBMIT {submit_url} with {len(data_urls)} image(s) and num_images={payload['num_images']}")
@@ -386,6 +391,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
 
     # ---- main ----
     def run(self, prompt: str, images: T.Optional[torch.Tensor] = None,
+            aspect_ratio: str = "1:1",
             model: str = DEFAULT_MODEL, endpoint_override: str = "",
             api_key: str = "",
             temperature: float = 0.6, output_format: str = "png",
@@ -393,6 +399,10 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
             timeout_sec: int = 120, request_id: str = "",
             debug_log: bool = False,
             use_fal_fallback: bool = False, fal_api_key: str = "", fal_route: str = "fal-ai/nano-banana/edit"):
+
+        if aspect_ratio.strip() not in _VALID_ASPECTS:
+            print(f"[PVL WARNING] Invalid or missing aspect_ratio '{aspect_ratio}', defaulting to 1:1.")
+            aspect_ratio = "1:1"
 
         key = (api_key or os.getenv("GEMINI_API_KEY","")).strip()
         input_mime = "image/png" if str(output_format).lower() == "png" else "image/jpeg"
@@ -416,7 +426,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
         # Build client & request
         client = self._make_client(key, endpoint_override)
         parts = self._build_parts(prompt, images, input_mime)
-        cfg = self._build_config(temperature, want_text)
+        cfg = self._build_config(temperature, want_text, aspect_ratio)
 
         if debug_log:
             p_preview = (prompt or "")[:180].replace("\n"," ")

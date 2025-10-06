@@ -1,22 +1,20 @@
 # pvl_google_nano_banana_multi_img.py
-# Node: PVL Google Nano-Banana Multi API (multi-image inputs, Gemini + FAL fallback)
+# PVL Google Nano-Banana Multi API — with regex delimiter support
 # Author: PVL
 # License: MIT
 #
-# Requires:
-#   pip install google-genai
-#
 # Features:
-# - 8 optional image inputs (image_1 ... image_8).
-# - num_images supported for Google via parallel calls.
-# - force_fal toggle to always use FAL API.
-# - FAL Queue API integration for robustness.
-# - If images differ in resolution -> resize to match first image.
-# - Ensures IMAGE output is always 4D tensor.
-# - Debug mode prints payloads sent to API.
+# - Text box for prompt input ("STRING").
+# - Regex-based delimiter input (e.g., \n|\| or ;+).
+# - num_images controls number of parallel API calls.
+# - If prompts < num_images, reuses the *last* prompt to fill the rest, with a warning.
+# - Parallel calls for Google; optional FAL-only mode and Google→FAL fallback.
+# - Optionally capture text output and print to console.
+# - Ensures IMAGE output is a 4D tensor (B, H, W, C).
 
-import os, io, json, base64, typing as T, time
+import os, io, json, base64, typing as T, time, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from google.genai import types
 import requests
 import numpy as np
 from PIL import Image
@@ -30,18 +28,24 @@ _TOP_P = 0.95
 _TOP_K = 64
 _MAX_TOKENS = 4096
 
-# --- image helpers ---
+
+# --------------------------- Image helpers ---------------------------
+
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     if img.mode != "RGB":
         img = img.convert("RGB")
     arr = np.asarray(img, dtype=np.float32) / 255.0
+    # Shape (H,W,C) -> (1,H,W,C) as ComfyUI image tensor
     return torch.from_numpy(arr)[None, ...]
 
+
 def tensor_to_pil(t: torch.Tensor) -> Image.Image:
+    # Accept (B,H,W,C) or (H,W,C)
     if t.ndim == 4:
         t = t[0]
-    arr = (t.clamp(0,1).cpu().numpy() * 255).astype("uint8")
+    arr = (t.clamp(0, 1).cpu().numpy() * 255).astype("uint8")
     return Image.fromarray(arr, "RGB")
+
 
 def encode_pil_bytes(img: Image.Image, mime: str) -> bytes:
     buf = io.BytesIO()
@@ -51,56 +55,147 @@ def encode_pil_bytes(img: Image.Image, mime: str) -> bytes:
         img.save(buf, format="PNG")
     return buf.getvalue()
 
+
 def _extract_image_bytes_from_part(part) -> T.Optional[bytes]:
+    """
+    Enhanced to handle more image data formats from Gemini API response
+    """
+    # Debug: Print the part structure
+    print(f"[EXTRACT DEBUG] Part type: {type(part)}")
+    
     try:
-        inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
+        # Try to get inline_data in various formats
+        inline = None
+        if hasattr(part, 'inline_data'):
+            inline = getattr(part, 'inline_data')
+            print(f"[EXTRACT DEBUG] Found inline_data attribute")
+        elif hasattr(part, 'inlineData'):
+            inline = getattr(part, 'inlineData')
+            print(f"[EXTRACT DEBUG] Found inlineData attribute")
+        elif isinstance(part, dict) and 'inline_data' in part:
+            inline = part['inline_data']
+            print(f"[EXTRACT DEBUG] Found inline_data dict key")
+        elif isinstance(part, dict) and 'inlineData' in part:
+            inline = part['inlineData']
+            print(f"[EXTRACT DEBUG] Found inlineData dict key")
+        
         if inline is not None:
-            data = getattr(inline, "data", None)
-            if isinstance(data, (bytes, bytearray)):
-                return bytes(data)
-            if isinstance(data, str):
-                try:
-                    return base64.b64decode(data, validate=False)
-                except Exception:
-                    return None
-    except Exception:
-        pass
-    if isinstance(part, dict):
-        if "inline_data" in part and isinstance(part["inline_data"], dict):
-            blob = part["inline_data"].get("data")
-        elif "inlineData" in part and isinstance(part["inlineData"], dict):
-            blob = part["inlineData"].get("data")
-        else:
-            blob = None
-        if isinstance(blob, (bytes, bytearray)):
-            return bytes(blob)
-        if isinstance(blob, str):
-            try:
-                return base64.b64decode(blob, validate=False)
-            except Exception:
-                return None
+            # Try to get data from inline
+            data = None
+            if hasattr(inline, 'data'):
+                data = getattr(inline, 'data')
+                print(f"[EXTRACT DEBUG] Found data attribute, type: {type(data)}")
+            elif isinstance(inline, dict) and 'data' in inline:
+                data = inline['data']
+                print(f"[EXTRACT DEBUG] Found data dict key, type: {type(data)}")
+            
+            if data is not None:
+                if isinstance(data, str):
+                    try:
+                        result = base64.b64decode(data, validate=False)
+                        print(f"[EXTRACT DEBUG] Successfully decoded base64 string of length {len(data)}")
+                        return result
+                    except Exception as e:
+                        print(f"[EXTRACT DEBUG] Failed to decode base64: {e}")
+                elif isinstance(data, bytes):
+                    print(f"[EXTRACT DEBUG] Found raw bytes of length {len(data)}")
+                    return data
+    except Exception as e:
+        print(f"[EXTRACT DEBUG] Exception during extraction: {e}")
+
+    # Try alternative approaches
+    try:
+        # Check if the part itself has image data
+        if hasattr(part, 'image_bytes'):
+            image_bytes = getattr(part, 'image_bytes')
+            print(f"[EXTRACT DEBUG] Found image_bytes attribute")
+            if isinstance(image_bytes, bytes):
+                return image_bytes
+        
+        # Check if the part is a dict with image data
+        if isinstance(part, dict):
+            for key in ['image_bytes', 'image_data', 'binary_data']:
+                if key in part:
+                    data = part[key]
+                    print(f"[EXTRACT DEBUG] Found {key} dict key")
+                    if isinstance(data, str):
+                        try:
+                            return base64.b64decode(data, validate=False)
+                        except Exception:
+                            pass
+                    elif isinstance(data, bytes):
+                        return data
+    except Exception as e:
+        print(f"[EXTRACT DEBUG] Exception during alternative extraction: {e}")
+    
+    # Last resort: try to find any base64 string in the part
+    try:
+        if isinstance(part, dict):
+            for key, value in part.items():
+                if isinstance(value, str) and len(value) > 100:  # Likely a base64 encoded image
+                    try:
+                        # Check if it looks like base64
+                        if value.startswith('data:image/') or re.match(r'^[A-Za-z0-9+/]+={0,2}$', value):
+                            # If it's a data URL, extract the base64 part
+                            if value.startswith('data:image/'):
+                                base64_data = value.split(',', 1)[1]
+                            else:
+                                base64_data = value
+                            
+                            result = base64.b64decode(base64_data, validate=False)
+                            print(f"[EXTRACT DEBUG] Found and decoded base64 in dict key '{key}'")
+                            return result
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[EXTRACT DEBUG] Exception during base64 search: {e}")
+    
+    print("[EXTRACT DEBUG] No image data found")
     return None
 
+
 def _extract_text_from_part(part) -> T.Optional[str]:
-    try:
-        txt = getattr(part, "text", None)
-        if txt is not None:
-            return str(txt)
-    except Exception:
-        pass
-    if isinstance(part, dict) and "text" in part and part["text"] is not None:
-        return str(part["text"])
-    return None
+    # Prefer dict, fallback to attribute getattr
+    if isinstance(part, dict):
+        if "text" in part and part["text"] is not None:
+            return str(part["text"])
+    txt = getattr(part, "text", None)
+    return str(txt) if txt is not None else None
+
 
 def _data_url(mime: str, raw: bytes) -> str:
     return f"data:{mime};base64," + base64.b64encode(raw).decode("utf-8")
+
+
+def _stack_images_same_size(tensors: T.List[torch.Tensor], debug: bool = False) -> torch.Tensor:
+    """
+    Concatenate (B,H,W,C) batches along B. If shapes mismatch, resize to the first image size.
+    """
+    if not tensors:
+        raise RuntimeError("No images to stack.")
+    try:
+        return torch.cat(tensors, dim=0)
+    except RuntimeError:
+        if debug:
+            print("[PVL NODE] Mismatched sizes, resizing to match first image.")
+        target_h, target_w = tensors[0].shape[1], tensors[0].shape[2]
+        fixed = []
+        for t in tensors:
+            pil = tensor_to_pil(t)
+            rp = pil.resize((target_w, target_h), Image.LANCZOS)
+            fixed.append(pil_to_tensor(rp))
+        return torch.cat(fixed, dim=0)
+
+
+# --------------------------- Main Node ---------------------------
 
 class PVL_Google_NanoBanana_Multi_API:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": "A tiny banana spaceship over a neon city."}),
+                "prompt": ("STRING", {"multiline": True, "default": "", "placeholder": "Enter prompts separated by regex delimiter"}),
+                "delimiter": ("STRING", {"default": "\\n-----\\n", "multiline": False, "placeholder": "Regex (e.g. \\n|\\| or ;+)"}),
             },
             "optional": {
                 "image_1": ("IMAGE",),
@@ -111,16 +206,16 @@ class PVL_Google_NanoBanana_Multi_API:
                 "image_6": ("IMAGE",),
                 "image_7": ("IMAGE",),
                 "image_8": ("IMAGE",),
+                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2 — works for both Google & FAL"}),
                 "model": ("STRING", {"default": DEFAULT_MODEL}),
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False,
                                        "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "output_format": (["png","jpeg"], {"default": "png"}),
+                "output_format": (["png", "jpeg"], {"default": "png"}),
                 "capture_text_output": ("BOOLEAN", {"default": False}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
                 "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
-                "request_id": ("STRING", {"default": ""}),
                 "debug_log": ("BOOLEAN", {"default": False}),
                 "use_fal_fallback": ("BOOLEAN", {"default": False}),
                 "force_fal": ("BOOLEAN", {"default": False}),
@@ -130,10 +225,12 @@ class PVL_Google_NanoBanana_Multi_API:
             }
         }
 
-    RETURN_TYPES = ("STRING","IMAGE",)
-    RETURN_NAMES = ("text","images")
+    RETURN_TYPES = ("STRING", "IMAGE",)
+    RETURN_NAMES = ("text", "images")
     FUNCTION = "run"
     CATEGORY = NODE_CATEGORY
+
+    # ------------------------- INTERNAL HELPERS -------------------------
 
     def _make_client(self, api_key: str, endpoint_override: str):
         from google import genai
@@ -152,34 +249,53 @@ class PVL_Google_NanoBanana_Multi_API:
         parts: T.List[dict] = []
         if prompt and prompt.strip():
             parts.append({"text": prompt})
-        
-        # Process all image tensors
         for img_tensor in image_tensors:
-            # Handle batched images (4D tensors)
             if img_tensor.ndim == 4:
                 for i in range(img_tensor.shape[0]):
-                    # Extract single image from batch
                     single_img = img_tensor[i:i+1]
                     pil = tensor_to_pil(single_img)
                     parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
             else:
-                # Handle single image (3D tensor)
                 pil = tensor_to_pil(img_tensor)
                 parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
         return parts
 
-    # --- FAL Queue API ---
+    def _build_call_prompts(self, base_prompts: T.List[str], num_images: int, debug: bool) -> T.List[str]:
+        """
+        Maps prompts to calls according to the agreed rule:
+          - If len(prompts) >= num_images → take first num_images
+          - If len(prompts) <  num_images → repeat the *last* prompt to fill
+        """
+        N = max(1, int(num_images))
+        if not base_prompts:
+            return []
+        if len(base_prompts) >= N:
+            call_prompts = base_prompts[:N]
+        else:
+            if debug:
+                print(f"[PVL NODE] Provided {len(base_prompts)} prompts but num_images={N}. "
+                      f"Reusing the last prompt for remaining calls.")
+            print(f"[PVL WARNING] prompt list shorter than num_images: {len(base_prompts)} < {N}. "
+                  f"Last entry will be reused for the remaining {N - len(base_prompts)} calls.")
+            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
+        if debug:
+            for i, cp in enumerate(call_prompts, 1):
+                show = cp if len(cp) <= 160 else (cp[:157] + "...")
+                print(f"[PVL NODE] Call #{i} prompt: {show}")
+        return call_prompts
+
     def _fal_queue_call(self, route: str, prompt: str, image_tensors: T.List[torch.Tensor],
                         mime: str, fal_key: str, timeout: int, debug: bool,
-                        num_images: int, output_format: str):
-
+                        output_format: str, aspect_ratio: str = "1:1"):
+        """
+        Calls FAL queue endpoint in sync_mode, returns (image_tensor_batched1, description_text).
+        """
         if not fal_key:
             raise RuntimeError("FAL requested but FAL_KEY is missing.")
 
-        # Build data URLs
+        # Convert any input images to data URLs
         data_urls = []
         for t in image_tensors:
-            # Handle batched images
             if t.ndim == 4:
                 for i in range(t.shape[0]):
                     single_img = t[i:i+1]
@@ -196,14 +312,14 @@ class PVL_Google_NanoBanana_Multi_API:
         headers = {"Authorization": f"Key {fal_key}"}
         payload = {
             "prompt": prompt or "",
-            # Use plural image_urls as required by the API
             "image_urls": data_urls,
-            "num_images": int(max(1,num_images)),
-            "output_format": ("png" if str(output_format).lower()=="png" else "jpeg"),
+            "num_images": 1,
+            "output_format": ("png" if str(output_format).lower() == "png" else "jpeg"),
+            "aspect_ratio": aspect_ratio,
             "sync_mode": True,
         }
         if debug:
-            print("[FAL SUBMIT]", json.dumps(payload)[:500])
+            print("[FAL SUBMIT]", json.dumps(payload)[:1000])
 
         r = requests.post(submit_url, headers=headers, json=payload, timeout=timeout)
         if not r.ok:
@@ -215,7 +331,6 @@ class PVL_Google_NanoBanana_Multi_API:
         if not req_id or not status_url or not resp_url:
             raise RuntimeError("FAL queue missing request_id/status/response")
 
-        # Poll
         deadline = time.time() + timeout
         while time.time() < deadline:
             sr = requests.get(status_url, headers=headers, timeout=10)
@@ -228,191 +343,224 @@ class PVL_Google_NanoBanana_Multi_API:
             raise RuntimeError(f"FAL result fetch error {rr.status_code}: {rr.text}")
         rdata = rr.json()
         if debug:
-            print("[FAL RAW]", json.dumps(rdata)[:800])
+            print("[FAL RAW]", json.dumps(rdata)[:2000])
 
-        # Collect outputs
         buckets = []
         resp = rdata.get("response") if isinstance(rdata, dict) else None
         if resp is None and isinstance(rdata, dict):
             resp = rdata
         if isinstance(resp, dict):
-            for key in ("images","outputs","artifacts"):
+            for key in ("images", "outputs", "artifacts"):
                 val = resp.get(key)
-                if isinstance(val, list): buckets.extend(val)
-            for key in ("image","output","result"):
+                if isinstance(val, list):
+                    buckets.extend(val)
+            for key in ("image", "output", "result"):
                 val = resp.get(key)
-                if isinstance(val,(str,dict)): buckets.append(val)
+                if isinstance(val, (str, dict)):
+                    buckets.append(val)
 
-        out=[]
+        out = []
         for item in buckets:
             try:
-                url = item if isinstance(item,str) else (item.get("url") or item.get("data") or item.get("image"))
-                if not url: continue
+                url = item if isinstance(item, str) \
+                    else (item.get("url") or item.get("data") or item.get("image"))
+                if not url:
+                    continue
                 if url.startswith("data:image/"):
-                    blob=base64.b64decode(url.split(",",1)[1])
+                    blob = base64.b64decode(url.split(",", 1)[1])
                 else:
-                    ir=requests.get(url,timeout=timeout)
-                    if not ir.ok: continue
-                    blob=ir.content
-                pil=Image.open(io.BytesIO(blob)).convert("RGB")
+                    ir = requests.get(url, timeout=timeout)
+                    if not ir.ok:
+                        continue
+                    blob = ir.content
+                pil = Image.open(io.BytesIO(blob)).convert("RGB")
                 out.append(pil_to_tensor(pil))
             except Exception as ex:
-                if debug: print("[FAL decode fail]",ex)
+                if debug:
+                    print("[FAL decode fail]", ex)
 
         if not out:
-            print("[PVL NODE] FAL returned no images – raw response:", json.dumps(resp, indent=2)[:2000])
             raise RuntimeError("FAL returned no images")
 
-        # Cap to num_images
-        out = out[:int(max(1, num_images))]
-        
-        # Convert to tensor
-        if len(out) == 1:
-            images_tensor = out[0]
-        else:
-            images_tensor = torch.cat(out, dim=0)
-        
-        # Extract text from response
-        description = resp.get("description") or rdata.get("description") or resp.get("output_text") or ""
-        
-        # Return (image, text) to match single-image version
-        return images_tensor, description
+        return out[0], (resp.get("description", "") if isinstance(resp, dict) else "")
 
-    # --- main run ---
-    def run(self, prompt: str,
-            image_1=None,image_2=None,image_3=None,image_4=None,
-            image_5=None,image_6=None,image_7=None,image_8=None,
+    # --------------------------- RUN MAIN -----------------------------
+
+    def run(self, prompt: str, delimiter: str,
+            image_1=None, image_2=None, image_3=None, image_4=None,
+            image_5=None, image_6=None, image_7=None, image_8=None,
+            aspect_ratio: str = "1:1",
             model: str = DEFAULT_MODEL, endpoint_override: str = "",
             api_key: str = "", temperature: float = 0.6, output_format: str = "png",
             capture_text_output: bool = False, num_images: int = 1,
-            timeout_sec: int = 120, request_id: str = "", debug_log: bool = False,
+            timeout_sec: int = 120, debug_log: bool = False,
             use_fal_fallback: bool = False, force_fal: bool = False,
             fal_api_key: str = "", fal_route: str = "fal-ai/nano-banana/edit"):
+        # --- Validate aspect ratio (for Google & FAL) ---
+        ar_original = aspect_ratio.strip()
+        valid_ratios = {"21:9","1:1","4:3","3:2","2:3","5:4","4:5","3:4","16:9","9:16"}
+        if not ar_original or ar_original not in valid_ratios:
+            print(f"[PVL WARNING] Invalid or missing aspect_ratio '{ar_original}', using 1:1.")
+            aspect_ratio = "1:1"
+        else:
+            aspect_ratio = ar_original
 
-        key = (api_key or os.getenv("GEMINI_API_KEY","")).strip()
-        input_mime = "image/png" if output_format.lower()=="png" else "image/jpeg"
-        want_text = bool(capture_text_output)
+        # --- Regex-based prompt splitting (with safe fallback to literal split) ---
+        try:
+            base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
+        except re.error:
+            print(f"[PVL WARNING] Invalid regex pattern '{delimiter}', using literal split.")
+            base_prompts = [p.strip() for p in prompt.split(delimiter) if str(p).strip()]
 
-        # Gather images
-        image_tensors=[]
-        for img in [image_1,image_2,image_3,image_4,image_5,image_6,image_7,image_8]:
+        if not base_prompts:
+            raise RuntimeError("No valid prompts provided.")
+
+        # Collect any provided images (tensors) in order
+        image_tensors: T.List[torch.Tensor] = []
+        for img in [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8]:
             if img is not None and torch.is_tensor(img):
-                # Keep batch dimension if present
                 image_tensors.append(img)
 
-        # ---- CASE: FAL only ----
+        # Map provided prompts to num_images calls
+        call_prompts = self._build_call_prompts(base_prompts, num_images, debug_log)
+
+        input_mime = "image/png" if output_format.lower() == "png" else "image/jpeg"
+        want_text = bool(capture_text_output)
+
+        # ---------------- FAL-only path ----------------
         if force_fal:
-            fal_key = (fal_api_key or os.getenv("FAL_KEY","")).strip()
-            if not fal_key: raise RuntimeError("force_fal=True but no FAL_KEY")
-            images_tensor, fal_text = self._fal_queue_call(
-                fal_route, prompt, image_tensors, input_mime, 
-                fal_key, timeout_sec, debug_log, num_images, output_format
-            )
-            text_out = fal_text if want_text else ""
+            fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
+            if not fal_key:
+                raise RuntimeError("force_fal=True but no FAL_KEY provided.")
+            results, texts = [], []
+            with ThreadPoolExecutor(max_workers=min(len(call_prompts), 6)) as ex:
+                futs = {
+                    ex.submit(self._fal_queue_call, fal_route, p, image_tensors,
+                              input_mime, fal_key, timeout_sec, debug_log, output_format, aspect_ratio): p
+                    for p in call_prompts
+                }
+                for fut in as_completed(futs):
+                    img, t = fut.result()
+                    results.append(img)  # Fixed: removed .unsqueeze(0)
+                    if t:
+                        texts.append(t)
+            images_tensor = _stack_images_same_size(results, debug_log)
+            text_out = "\n".join(texts) if want_text else ""
             return text_out, images_tensor
 
-        # ---- CASE: Google ----
+        # ---------------- Google path (with optional FAL fallback) ----------------
+        key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         if not key:
             raise RuntimeError("Gemini API key missing. Pass api_key or set GEMINI_API_KEY.")
-
         client = self._make_client(key, endpoint_override)
-        parts = self._build_parts(prompt, image_tensors, input_mime)
 
-        cfg = {
-            "temperature": float(temperature),
-            "top_p": _TOP_P,
-            "top_k": _TOP_K,
-            "max_output_tokens": _MAX_TOKENS,
-            "response_modalities": ["IMAGE","TEXT"] if want_text else ["IMAGE"],
-        }
+        def google_call(p: str, debug: bool):
+            # Prepend explicit image generation instruction
+            image_prompt = f"{p}"
+            if debug:
+                print(f"[GEMINI PROMPT] {image_prompt}")
+            
+            parts = self._build_parts(image_prompt, image_tensors, input_mime)
 
-        if debug_log:
-            print("[GOOGLE SUBMIT] Prompt:", (prompt or "")[:200])
-            print("[GOOGLE SUBMIT] Num images:", num_images)
-            print("[GOOGLE SUBMIT] Input images:", len(image_tensors))
+            # Correct configuration for image generation
+            cfg = types.GenerateContentConfig(
+                temperature=float(temperature),
+                top_p=_TOP_P,
+                top_k=_TOP_K,
+                max_output_tokens=_MAX_TOKENS,
+                response_modalities=["Image"],  # Request image generation
+                # No response_mime_type - model returns PNG by default
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+            )
 
-        def google_call(i:int):
             resp = client.models.generate_content(
                 model=model,
-                contents=[{"role":"user","parts":parts}],
+                contents=[{"role": "user", "parts": parts}],
                 config=cfg,
             )
-            imgs,texts=[],[]
-            for cand in getattr(resp,"candidates",[]) or []:
-                for p in getattr(cand,"content",None).parts or []:
-                    blob=_extract_image_bytes_from_part(p)
+            
+            if debug:
+                print("[GEMINI RESPONSE STRUCTURE]")
+                print(f"  Candidates: {len(getattr(resp, 'candidates', []))}")
+                for i, cand in enumerate(getattr(resp, 'candidates', []) or []):
+                    content = getattr(cand, 'content', None)
+                    parts_out = getattr(content, 'parts', []) if content else []
+                    print(f"  Candidate {i}: {len(parts_out)} parts")
+                    for j, prt in enumerate(parts_out):
+                        # Enhanced debugging
+                        print(f"    Part {j}: Type = {type(prt)}")
+                        if hasattr(prt, '__dict__'):
+                            print(f"      Attributes: {list(prt.__dict__.keys())}")
+                        elif isinstance(prt, dict):
+                            print(f"      Keys: {list(prt.keys())}")
+            
+            imgs, texts = [], []
+            for cand in getattr(resp, "candidates", []) or []:
+                content = getattr(cand, "content", None)
+                parts_out = getattr(content, "parts", []) if content else []
+                for prt in parts_out:
+                    blob = _extract_image_bytes_from_part(prt)
                     if blob:
-                        pil=Image.open(io.BytesIO(blob)).convert("RGB")
-                        imgs.append(pil_to_tensor(pil))
+                        if debug:
+                            print(f"    Extracted image blob of size {len(blob)} bytes")
+                        try:
+                            pil = Image.open(io.BytesIO(blob)).convert("RGB")
+                            imgs.append(pil_to_tensor(pil))
+                        except Exception as e:
+                            print(f"    Failed to convert blob to image: {e}")
                     else:
-                        t=_extract_text_from_part(p)
-                        if t: texts.append(t)
-            return imgs,texts
+                        t = _extract_text_from_part(prt)
+                        if t:
+                            if debug:
+                                print(f"    Extracted text: {t[:100]}...")
+                            texts.append(t)
+            
+            if debug:
+                print(f"[GEMINI RESULT] Found {len(imgs)} images and {len(texts)} text parts")
+            
+            return imgs, texts
 
-        N=max(1,int(num_images))
-        out_imgs,out_texts=[],[]
-        if N==1:
-            imgs,texts=google_call(0)
-            out_imgs.extend(imgs); out_texts.extend(texts)
-        else:
-            with ThreadPoolExecutor(max_workers=min(N,6)) as ex:
-                futs={ex.submit(google_call,i):i for i in range(N)}
-                for fut in as_completed(futs):
-                    imgs,texts=fut.result()
-                    out_imgs.extend(imgs); out_texts.extend(texts)
+        out_imgs: T.List[torch.Tensor] = []
+        out_texts: T.List[str] = []
+        with ThreadPoolExecutor(max_workers=min(len(call_prompts), 6)) as ex:
+            futs = {ex.submit(google_call, p, debug_log): p for p in call_prompts}
+            for fut in as_completed(futs):
+                imgs, texts = fut.result()
+                if imgs:
+                    # Fixed: removed .unsqueeze(0) since pil_to_tensor already adds batch dimension
+                    out_imgs.append(imgs[0])
+                if texts:
+                    out_texts.extend(texts)
 
         if not out_imgs:
             if use_fal_fallback:
-                fal_key=(fal_api_key or os.getenv("FAL_KEY","")).strip()
-                images_tensor, fal_text = self._fal_queue_call(
-                    fal_route, prompt, image_tensors, input_mime, 
-                    fal_key, timeout_sec, debug_log, num_images, output_format
-                )
-                
-                # Combine Google and FAL text if requested
-                if want_text:
-                    combined_text = ""
-                    if out_texts:
-                        combined_text += "\n\n--- Google ---\n\n" + "\n".join(out_texts)
-                    if fal_text:
-                        combined_text += "\n\n--- FAL ---\n\n" + fal_text
-                    text_out = combined_text
-                else:
-                    text_out = ""
-                    
+                fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
+                if not fal_key:
+                    raise RuntimeError("Google returned no images and FAL fallback has no FAL_KEY.")
+                results, texts = [], []
+                with ThreadPoolExecutor(max_workers=min(len(call_prompts), 6)) as ex:
+                    futs = {
+                        ex.submit(self._fal_queue_call, fal_route, p, image_tensors,
+                              input_mime, fal_key, timeout_sec, debug_log, output_format, aspect_ratio): p
+                        for p in call_prompts
+                    }
+                    for fut in as_completed(futs):
+                        img, t = fut.result()
+                        results.append(img)  # Fixed: removed .unsqueeze(0)
+                        if t:
+                            texts.append(t)
+                images_tensor = _stack_images_same_size(results, debug_log)
+                combo_texts = out_texts + texts
+                text_out = "\n".join(combo_texts) if want_text else ""
                 return text_out, images_tensor
             raise RuntimeError("Gemini returned no images")
 
-        # Handle size mismatch: resize to first image size
-        if len(out_imgs) > 1:
-            try:
-                images_tensor = torch.cat(out_imgs,dim=0)
-            except RuntimeError:
-                if debug_log: 
-                    print("[GOOGLE] Mismatched sizes, resizing to match first image")
-                
-                # Resize all images to match the first image's dimensions
-                target_size = out_imgs[0].shape[1:3]  # (H, W)
-                resized_imgs = []
-                
-                for img in out_imgs:
-                    pil = tensor_to_pil(img)
-                    resized_pil = pil.resize((target_size[1], target_size[0]), Image.LANCZOS)
-                    resized_imgs.append(pil_to_tensor(resized_pil))
-                
-                images_tensor = torch.cat(resized_imgs, dim=0)
-        else:
-            images_tensor = out_imgs[0]
-            if images_tensor.ndim == 3:
-                images_tensor = images_tensor.unsqueeze(0)
-
-        text_out="\n".join(out_texts) if (want_text and out_texts) else ""
-        
-        # Print text output if present
+        images_tensor = _stack_images_same_size(out_imgs, debug_log)
+        text_out = "\n".join(out_texts) if (want_text and out_texts) else ""
         if text_out:
             print(f"[PVL Google NanoBanana Output]:\n{text_out}\n")
-            
         return text_out, images_tensor
 
-NODE_CLASS_MAPPINGS={"PVL_Google_NanoBanana_Multi_API":PVL_Google_NanoBanana_Multi_API}
-NODE_DISPLAY_NAME_MAPPINGS={"PVL_Google_NanoBanana_Multi_API":NODE_NAME}
+
+NODE_CLASS_MAPPINGS = {"PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Google_NanoBanana_Multi_API": NODE_NAME}
