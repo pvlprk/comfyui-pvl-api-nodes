@@ -215,18 +215,19 @@ class PVL_fal_FluxWithLora_API:
                 print(f"[PVL INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
                 return (img_tensor,)
             
-            # Multiple calls: TRUE PARALLEL execution
+            # Multiple calls: TRUE PARALLEL execution with seed increment
             print(f"[PVL INFO] Submitting {len(call_prompts)} requests in parallel...")
             
             # PHASE 1: Submit all requests in parallel
             submit_results = []
-            max_workers = min(len(call_prompts), 6)  # Increased from 4 to 6
+            max_workers = min(len(call_prompts), 6)
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 submit_futs = {
                     executor.submit(
                         self._fal_submit_only,
-                        call_prompts[i], width, height, steps, CFG, seed,
+                        call_prompts[i], width, height, steps, CFG,
+                        seed if seed == -1 else (seed + i) % 4294967296,  # FIXED: Increment seed with overflow protection
                         enable_safety_checker, output_format, sync_mode,
                         lora1_name, lora1_scale, lora2_name, lora2_scale,
                         lora3_name, lora3_scale
@@ -293,6 +294,12 @@ class PVL_fal_FluxWithLora_API:
             
             _t1 = time.time()
             print(f"[PVL INFO] Successfully generated {final_tensor.shape[0]} images in {(_t1 - _t0):.2f}s")
+            
+            # Print seed info if seed was manually set
+            if seed != -1:
+                seed_list = [(seed + i) % 4294967296 for i in range(len(all_images))]
+                print(f"[PVL INFO] Seeds used: {seed_list}")
+            
             return (final_tensor,)
             
         except Exception as e:

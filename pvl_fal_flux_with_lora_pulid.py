@@ -224,7 +224,7 @@ class PVL_fal_FluxWithLoraPulID_API:
                 print(f"[PVL INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
                 return (img_tensor,)
             
-            # Multiple calls: TRUE PARALLEL execution
+            # Multiple calls: TRUE PARALLEL execution with seed increment
             print(f"[PVL INFO] Submitting {len(call_prompts)} requests in parallel...")
             
             # PHASE 1: Submit all requests in parallel
@@ -236,7 +236,9 @@ class PVL_fal_FluxWithLoraPulID_API:
                     executor.submit(
                         self._fal_submit_only,
                         call_prompts[i], reference_image_url, image_size, custom_width, custom_height,
-                        num_inference_steps, seed, guidance_scale, negative_prompt, sync_mode,
+                        num_inference_steps,
+                        seed if seed == -1 else (seed + i) % 4294967296,  # FIXED: Increment seed with overflow protection
+                        guidance_scale, negative_prompt, sync_mode,
                         enable_safety_checker, lora_path, lora_strength, start_step, true_cfg,
                         id_weight, max_sequence_length
                     ): i
@@ -302,6 +304,12 @@ class PVL_fal_FluxWithLoraPulID_API:
             
             _t1 = time.time()
             print(f"[PVL INFO] Successfully generated {final_tensor.shape[0]} images in {(_t1 - _t0):.2f}s")
+            
+            # Print seed info if seed was manually set
+            if seed != -1:
+                seed_list = [(seed + i) % 4294967296 for i in range(len(all_images))]
+                print(f"[PVL INFO] Seeds used: {seed_list}")
+            
             return (final_tensor,)
             
         except Exception as e:

@@ -18,10 +18,10 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
                 "prompt": ("STRING", {"multiline": True}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 4294967295}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 4}),
-                "output_format": (["jpeg", "png"], {"default": "png"}),
+                "output_format": (["jpeg", "png"], {"default": "jpeg"}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
                 "safety_tolerance": (["1", "2", "3", "4", "5", "6"], {"default": "2"}),
-                "aspect_ratio": ("STRING", {"default": "1:1", "defaultInput": True}),
+                "aspect_ratio": ("STRING", {"default": "16:9", "defaultInput": True}),
             },
             "optional": {
                 "delimiter": ("STRING", {"default": "[*]", "multiline": False, "placeholder": "Delimiter for splitting prompts (e.g., [*], \\n, |)"}),
@@ -256,7 +256,7 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
                 print(f"[PVL INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
                 return (result,)
             
-            # Multiple calls: TRUE PARALLEL execution
+            # Multiple calls: TRUE PARALLEL execution with seed increment
             print(f"[PVL INFO] Submitting {len(call_prompts)} requests in parallel...")
             
             # PHASE 1: Submit all requests in parallel
@@ -267,7 +267,9 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
                 submit_futs = {
                     executor.submit(
                         self._fal_submit_only,
-                        call_prompts[i], seed, output_format, sync_mode,
+                        call_prompts[i],
+                        seed if seed == -1 else (seed + i) % 4294967296,  # Increment seed with overflow protection
+                        output_format, sync_mode,
                         safety_tolerance, aspect_ratio, enable_safety_checker, raw
                     ): i
                     for i in range(len(call_prompts))
@@ -332,6 +334,12 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
             
             _t1 = time.time()
             print(f"[PVL INFO] Successfully generated {final_tensor.shape[0]} images in {(_t1 - _t0):.2f}s")
+            
+            # Print seed info if seed was manually set
+            if seed != -1:
+                seed_list = [seed + i for i in range(len(all_images))]
+                print(f"[PVL INFO] Seeds used: {seed_list}")
+            
             return (final_tensor,)
             
         except Exception as e:
