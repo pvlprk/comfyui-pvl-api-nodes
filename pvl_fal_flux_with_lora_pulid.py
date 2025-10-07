@@ -4,34 +4,37 @@ import torch
 import time
 import requests
 import io
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .fal_utils import FalConfig, ImageUtils, ResultProcessor, ApiHandler
 
-class PVL_fal_FluxWithLora_API:
+class PVL_fal_FluxWithLoraPulID_API:
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True}),
-                "width": ("INT", {"default": 1392, "min": 256, "max": 1440}),
-                "height": ("INT", {"default": 752, "min": 256, "max": 1440}),
-                "steps": ("INT", {"default": 25, "min": 1, "max": 100}),
-                "CFG": ("FLOAT", {"default": 3.5, "min": 1.0, "max": 20.0, "step": 0.1}),
-                "seed": ("INT", {"default": -1, "min": -1, "max": 4294967295}),
+                "prompt": ("STRING", {"multiline": True, "default": "a woman holding sign with glowing green text 'PuLID for FLUX'"}),
+                "reference_image": ("IMAGE",),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 4}),
-                "enable_safety_checker": ("BOOLEAN", {"default": False}),
-                "output_format": (["jpeg", "png"], {"default": "png"}),
+                "num_inference_steps": ("INT", {"default": 20, "min": 1, "max": 100}),
+                "guidance_scale": ("FLOAT", {"default": 4.0, "min": 1.0, "max": 20.0, "step": 0.1}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 4294967295}),
+                "enable_safety_checker": ("BOOLEAN", {"default": True}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "delimiter": ("STRING", {"default": "[*]", "multiline": False, "placeholder": "Delimiter for splitting prompts (e.g., [*], \\n, |)"}),
-                "lora1_name": ("STRING", {"default": ""}),
-                "lora1_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
-                "lora2_name": ("STRING", {"default": ""}),
-                "lora2_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
-                "lora3_name": ("STRING", {"default": ""}),
-                "lora3_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
+                "image_size": (["square_hd", "square", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"], {"default": "landscape_4_3"}),
+                "custom_width": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 64}),
+                "custom_height": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 64}),
+                "negative_prompt": ("STRING", {"multiline": True, "default": "bad quality, worst quality, text, signature, watermark, extra limbs"}),
+                "lora_path": ("STRING", {"default": "", "placeholder": "Optional LoRA path"}),
+                "lora_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1}),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 100}),
+                "true_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "id_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.1}),
+                "max_sequence_length": (["128", "256", "512"], {"default": "128"}),
             },
         }
     
@@ -60,48 +63,48 @@ class PVL_fal_FluxWithLora_API:
     
     # -------- FAL Queue API - TWO PHASE EXECUTION --------
     
-    def _fal_submit_only(self, prompt_text, width, height, steps, CFG, seed,
-                         enable_safety_checker, output_format, sync_mode,
-                         lora1_name, lora1_scale, lora2_name, lora2_scale,
-                         lora3_name, lora3_scale):
+    def _fal_submit_only(self, prompt_text, reference_image_url, image_size, custom_width, custom_height,
+                         num_inference_steps, seed, guidance_scale, negative_prompt, sync_mode,
+                         enable_safety_checker, lora_path, lora_strength, start_step, true_cfg,
+                         id_weight, max_sequence_length):
         """
         Phase 1: Submit request to FAL and return request info immediately.
         Does NOT wait for completion.
         """
+        # Build image_size argument
+        if custom_width > 0 and custom_height > 0:
+            image_size_arg = {"width": custom_width, "height": custom_height}
+        else:
+            image_size_arg = image_size
+        
         arguments = {
             "prompt": prompt_text,
-            "num_inference_steps": steps,
-            "guidance_scale": CFG,
-            "num_images": 1,  # Each call generates 1 image
-            "enable_safety_checker": enable_safety_checker,
-            "output_format": output_format,
+            "reference_image_url": reference_image_url,
+            "image_size": image_size_arg,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "negative_prompt": negative_prompt,
             "sync_mode": sync_mode,
-            "image_size": {
-                "width": width,
-                "height": height
-            }
+            "enable_safety_checker": enable_safety_checker,
+            "true_cfg": true_cfg,
+            "id_weight": id_weight,
+            "max_sequence_length": max_sequence_length,
         }
         
         if seed != -1:
             arguments["seed"] = seed
-        
-        # Handle LoRAs
-        loras = []
-        if lora1_name.strip():
-            loras.append({"path": lora1_name.strip(), "scale": lora1_scale})
-        if lora2_name.strip():
-            loras.append({"path": lora2_name.strip(), "scale": lora2_scale})
-        if lora3_name.strip():
-            loras.append({"path": lora3_name.strip(), "scale": lora3_scale})
-        if loras:
-            arguments["loras"] = loras
+        if lora_path.strip():
+            arguments["lora_path"] = lora_path.strip()
+            arguments["lora_strength"] = lora_strength
+        if start_step > 0:
+            arguments["start_step"] = start_step
         
         # Check if ApiHandler supports async submission
         if hasattr(ApiHandler, 'submit_only'):
-            return ApiHandler.submit_only("fal-ai/flux-lora", arguments)
+            return ApiHandler.submit_only("fal-ai/flux-pulid-lora", arguments)
         else:
             # Fallback to direct FAL queue API
-            return self._direct_fal_submit("fal-ai/flux-lora", arguments)
+            return self._direct_fal_submit("fal-ai/flux-pulid-lora", arguments)
     
     def _direct_fal_submit(self, endpoint, arguments):
         """Direct FAL queue API submission when ApiHandler doesn't support async."""
@@ -173,16 +176,22 @@ class PVL_fal_FluxWithLora_API:
         # Process result using ResultProcessor
         return ResultProcessor.process_image_result(result)
     
-    def generate_image(self, prompt, width, height, steps, CFG, seed,
-                      num_images, enable_safety_checker, output_format, sync_mode,
+    def generate_image(self, prompt, reference_image, num_images, num_inference_steps,
+                      guidance_scale, seed, enable_safety_checker, sync_mode,
                       delimiter="[*]",
-                      lora1_name="", lora1_scale=1.0,
-                      lora2_name="", lora2_scale=1.0,
-                      lora3_name="", lora3_scale=1.0):
+                      image_size="landscape_4_3", custom_width=0, custom_height=0,
+                      negative_prompt="bad quality, worst quality, text, signature, watermark, extra limbs",
+                      lora_path="", lora_strength=1.0, start_step=0, true_cfg=1.0,
+                      id_weight=1.0, max_sequence_length="128"):
         
         _t0 = time.time()
         
         try:
+            # Upload reference image once (shared for all calls)
+            print("[PVL INFO] Uploading reference image to fal.ai storage...")
+            reference_image_url = ImageUtils.upload_image(reference_image)
+            print(f"[PVL INFO] Reference image uploaded: {reference_image_url}")
+            
             # Split prompts using delimiter with regex support
             try:
                 base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
@@ -200,10 +209,10 @@ class PVL_fal_FluxWithLora_API:
             # Single call: process directly (less overhead)
             if len(call_prompts) == 1:
                 req_info = self._fal_submit_only(
-                    call_prompts[0], width, height, steps, CFG, seed,
-                    enable_safety_checker, output_format, sync_mode,
-                    lora1_name, lora1_scale, lora2_name, lora2_scale,
-                    lora3_name, lora3_scale
+                    call_prompts[0], reference_image_url, image_size, custom_width, custom_height,
+                    num_inference_steps, seed, guidance_scale, negative_prompt, sync_mode,
+                    enable_safety_checker, lora_path, lora_strength, start_step, true_cfg,
+                    id_weight, max_sequence_length
                 )
                 result = self._fal_poll_and_fetch(req_info)
                 
@@ -220,16 +229,16 @@ class PVL_fal_FluxWithLora_API:
             
             # PHASE 1: Submit all requests in parallel
             submit_results = []
-            max_workers = min(len(call_prompts), 6)  # Increased from 4 to 6
+            max_workers = min(len(call_prompts), 6)
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 submit_futs = {
                     executor.submit(
                         self._fal_submit_only,
-                        call_prompts[i], width, height, steps, CFG, seed,
-                        enable_safety_checker, output_format, sync_mode,
-                        lora1_name, lora1_scale, lora2_name, lora2_scale,
-                        lora3_name, lora3_scale
+                        call_prompts[i], reference_image_url, image_size, custom_width, custom_height,
+                        num_inference_steps, seed, guidance_scale, negative_prompt, sync_mode,
+                        enable_safety_checker, lora_path, lora_strength, start_step, true_cfg,
+                        id_weight, max_sequence_length
                     ): i
                     for i in range(len(call_prompts))
                 }
@@ -296,8 +305,10 @@ class PVL_fal_FluxWithLora_API:
             return (final_tensor,)
             
         except Exception as e:
-            print(f"Error generating image with FLUX: {str(e)}")
-            return ApiHandler.handle_image_generation_error("FLUX", e)
+            print(f"Error generating image with FLUX PuLID LoRA: {str(e)}")
+            # Fallback error handling - return empty tensor
+            empty_tensor = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            return (empty_tensor,)
 
-NODE_CLASS_MAPPINGS = {"PVL_fal_FluxWithLora_API": PVL_fal_FluxWithLora_API}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_fal_FluxWithLora_API": "PVL FAL Flux with LoRA"}
+NODE_CLASS_MAPPINGS = {"PVL_fal_FluxWithLoraPulID_API": PVL_fal_FluxWithLoraPulID_API}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_fal_FluxWithLoraPulID_API": "PVL Flux Lora PulID (fal.ai)"}
