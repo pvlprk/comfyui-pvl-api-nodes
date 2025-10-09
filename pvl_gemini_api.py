@@ -173,12 +173,12 @@ class PVL_Gemini_API:
                 "model": (HARDCODED_MODELS, {"default": default_model}),
                 "tries": ("INT", {"default": 2, "min": 1, "max": 10}),
                 "timeout": ("INT", {"default": 45, "min": 1, "max": 600}),
-                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "top_k": ("INT", {"default": 40, "min": 0, "max": 100}),
+                "temperature": ("FLOAT", {"default": 1, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
                 "batch": ("INT", {"default": 1, "min": 1, "max": 10}),
-                "delimiter": ("STRING", {"default": "\\n-----\\n", "multiline": False}),
-                "append_variation_tag": ("BOOLEAN", {"default": True}),
+                "delimiter": ("STRING", {"default": "[*]", "multiline": False}),
+                "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
             },
             "optional": {
@@ -186,6 +186,7 @@ class PVL_Gemini_API:
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "image": ("IMAGE",),
                 "api_key": ("STRING", {"default": ""}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             }
         }
 
@@ -198,7 +199,8 @@ class PVL_Gemini_API:
             top_p: float, top_k: int, batch: int, delimiter: str,
             append_variation_tag: bool, debug: bool,
             instructions: Optional[str] = "", prompt: Optional[str] = "",
-            image: Any = None, api_key: str = ""):
+            image: Any = None, api_key: str = "",
+                seed: int = 0):
 
         start_time = time.time()  # <-- Start timer
 

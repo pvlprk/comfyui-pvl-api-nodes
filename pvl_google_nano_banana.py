@@ -145,8 +145,8 @@ class PVL_Google_NanoBanana_API:
                 "model": ("STRING", {"default": DEFAULT_MODEL}),
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
-                "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "output_format": (["png", "jpeg"], {"default": "png"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                                "output_format": (["png", "jpeg"], {"default": "png"}),
                 "capture_text_output": ("BOOLEAN", {"default": False}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
                 "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
@@ -204,12 +204,10 @@ class PVL_Google_NanoBanana_API:
         
         return parts
     
-    def _build_config(self, temperature: float, want_text: bool, aspect_ratio: str):
         try:
             from google.genai import types
             
             cfg = types.GenerateContentConfig(
-                temperature=float(temperature),
                 top_p=float(_TOP_P),
                 top_k=int(_TOP_K),
                 max_output_tokens=int(_MAX_TOKENS),
@@ -227,7 +225,6 @@ class PVL_Google_NanoBanana_API:
         except Exception:
             # Fallback dict config
             return {
-                "temperature": float(temperature),
                 "top_p": float(_TOP_P),
                 "top_k": int(_TOP_K),
                 "max_output_tokens": int(_MAX_TOKENS),
@@ -481,7 +478,6 @@ class PVL_Google_NanoBanana_API:
         model: str = DEFAULT_MODEL,
         endpoint_override: str = "",
         api_key: str = "",
-        temperature: float = 0.6,
         output_format: str = "png",
         capture_text_output: bool = False,
         num_images: int = 1,
@@ -606,7 +602,7 @@ class PVL_Google_NanoBanana_API:
             raise RuntimeError("Gemini API key missing. Pass api_key or set GEMINI_API_KEY.")
         
         client = self._make_client(key, endpoint_override)
-        cfg = self._build_config(temperature, want_text, aspect_ratio)
+        cfg = self._build_config(want_text, aspect_ratio)
         
         if debug_log:
             print(f"[PVL Debug] Processing {len(call_prompts)} prompts in parallel")

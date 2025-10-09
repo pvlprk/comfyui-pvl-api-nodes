@@ -39,6 +39,7 @@ from .pvl_fal_remove_bg_v2 import PVL_fal_RemoveBackground_API
 from .pvl_fal_depth_anything_v2 import PVL_fal_DepthAnythingV2_API
 from .pvl_google_nano_banana_mandatory_img import PVL_Google_NanoBanana_API_mandatory_IMG
 from .pvl_fal_flux_with_lora_pulid import PVL_fal_FluxWithLoraPulID_API
+from .pvl_fal_ministudio_avatar import PVL_fal_FluxDevPulidAvatar_API
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -82,6 +83,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_DepthAnythingV2_API": PVL_fal_DepthAnythingV2_API,
     "PVL_Google_NanoBanana_API_mandatory_IMG": PVL_Google_NanoBanana_API_mandatory_IMG,
     "PVL_fal_FluxWithLoraPulID_API": PVL_fal_FluxWithLoraPulID_API,
+    "PVL_fal_FluxDevPulidAvatar_API": PVL_fal_FluxDevPulidAvatar_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -125,4 +127,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_DepthAnythingV2_API": "PVL Depth Anything V2 (fal.ai)",
     "PVL_Google_NanoBanana_API_mandatory_IMG": "PVL Google Nano-Banana API mandatory IMG",
     "PVL_fal_FluxWithLoraPulID_API": "PVL Flux Lora PulID (fal.ai)",
+    "PVL_fal_FluxDevPulidAvatar_API": "PVL Flux Dev Pulid Avatar (fal.ai)",
 }

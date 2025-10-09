@@ -21,6 +21,7 @@ import requests
 import numpy as np
 from PIL import Image
 import torch
+import random
 from google.genai import types
 
 NODE_NAME = "PVL Google Nano-Banana API mandatory IMG"
@@ -124,7 +125,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 "model": ("STRING", {"default": DEFAULT_MODEL}),
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
-                "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "output_format": (["png", "jpeg"], {"default": "png"}),
                 "capture_text_output": ("BOOLEAN", {"default": False}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
@@ -322,7 +323,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
     def run(self, prompt: str, images: torch.Tensor,
             delimiter: str = "[*]", aspect_ratio: str = "1:1",
             model: str = DEFAULT_MODEL, endpoint_override: str = "",
-            api_key: str = "", temperature: float = 0.6,
+            api_key: str = "",
             output_format: str = "png", capture_text_output: bool = False,
             num_images: int = 1, timeout_sec: int = 120,
             debug_log: bool = False, use_fal_fallback: bool = True,
@@ -450,9 +451,6 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
             parts = self._build_parts(p, images, input_mime)
             
             cfg = types.GenerateContentConfig(
-                temperature=float(temperature),
-                top_p=_TOP_P,
-                top_k=_TOP_K,
                 max_output_tokens=_MAX_TOKENS,
                 response_modalities=["Image"],
                 image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
