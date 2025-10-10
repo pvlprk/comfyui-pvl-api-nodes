@@ -1,24 +1,39 @@
+
 # pvl_google_nano_banana_multi_img.py
-
-# PVL Google Nano-Banana Multi API — with regex delimiter support
-
+# Node: PVL Google Nano-Banana Multi API (Gemini + FAL) — multi-image inputs + delimiter + parallel
 # Author: PVL
 # License: MIT
+#
+# This node mirrors the working single-input node (pvl_google_nano_banana.py) but supports up to 8 IMAGE inputs.
+# Key features (parity with reference):
+# - Regex-based delimiter input for splitting prompts (default: [*])
+# - Parallel API calls for multiple prompts
+# - TRUE PARALLEL FAL execution: submit all requests first, then poll for results
+# - If prompts < num_images, reuses the last prompt to fill remaining calls
+# - Up to eight optional ComfyUI IMAGE inputs (each can be a batch); all are sent
+# - aspect_ratio supported for both Google and FAL
+# - use_fal_fallback default True (fallback to FAL when Google returns no images)
+# - force_fal toggle to always use FAL (bypass Google)
+# - Dual FAL routes: img2img (edit) vs txt2img (generate) chosen automatically based on whether any input image is provided
+# - Individual request error handling with partial results support
+# - Prints execution time even when debug is off
+#
+# Requires:
+#   pip install google-genai requests pillow numpy torch
+#
+# Notes:
+# - seed is accepted for ComfyUI compatibility but not used by APIs.
+# - output_format controls MIME for input encoding and FAL target ("png" or "jpeg").
 
-# Features:
-# - Text box for prompt input ("STRING").
-# - Regex-based delimiter input (e.g., \n|\| or ;+).
-# - num_images controls number of parallel API calls.
-# - If prompts < num_images, reuses the *last* prompt to fill the rest, with a warning.
-# - Parallel calls for Google; optional FAL-only mode and Google→FAL fallback.
-# - TRUE PARALLEL FAL execution: submit all requests first, then poll for results.
-# - Optionally capture text output and print to console.
-# - Ensures IMAGE output is a 4D tensor (B, H, W, C).
-# - sync_mode toggle for FAL API (default: False)
-
-import os, io, json, base64, typing as T, time, re
+import os
+import io
+import json
+import base64
+import typing as T
+import time
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from google.genai import types
+
 import requests
 import numpy as np
 from PIL import Image
@@ -30,14 +45,16 @@ DEFAULT_MODEL = "gemini-2.5-flash-image-preview"
 _TOP_P = 0.95
 _TOP_K = 64
 _MAX_TOKENS = 4096
+_VALID_ASPECTS = {"21:9", "1:1", "4:3", "3:2", "2:3", "5:4", "4:5", "3:4", "16:9", "9:16"}
 
-# --------------------------- Image helpers ---------------------------
+# ----------------- image helpers -----------------
 
 def pil_to_tensor(img: Image.Image) -> torch.Tensor:
     if img.mode != "RGB":
         img = img.convert("RGB")
     arr = np.asarray(img, dtype=np.float32) / 255.0
-    return torch.from_numpy(arr)[None, ...]
+    t = torch.from_numpy(arr)[None, ...]
+    return t
 
 def tensor_to_pil(t: torch.Tensor) -> Image.Image:
     if t.ndim == 4:
@@ -53,53 +70,8 @@ def encode_pil_bytes(img: Image.Image, mime: str) -> bytes:
         img.save(buf, format="PNG")
     return buf.getvalue()
 
-def _extract_image_bytes_from_part(part) -> T.Optional[bytes]:
-    """Extract image bytes from Gemini API response part."""
-    try:
-        inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
-        if inline is not None:
-            data = getattr(inline, "data", None)
-            if isinstance(data, (bytes, bytearray)):
-                return bytes(data)
-            if isinstance(data, str):
-                try:
-                    return base64.b64decode(data, validate=False)
-                except Exception:
-                    return None
-    except Exception:
-        pass
-    
-    if isinstance(part, dict):
-        blob = None
-        if "inline_data" in part and isinstance(part["inline_data"], dict):
-            blob = part["inline_data"].get("data")
-        elif "inlineData" in part and isinstance(part["inlineData"], dict):
-            blob = part["inlineData"].get("data")
-        
-        if isinstance(blob, (bytes, bytearray)):
-            return bytes(blob)
-        if isinstance(blob, str):
-            try:
-                return base64.b64decode(blob, validate=False)
-            except Exception:
-                return None
-    
-    return None
-
-def _extract_text_from_part(part) -> T.Optional[str]:
-    if isinstance(part, dict):
-        if "text" in part and part["text"] is not None:
-            return str(part["text"])
-    txt = getattr(part, "text", None)
-    return str(txt) if txt is not None else None
-
-def _data_url(mime: str, raw: bytes) -> str:
-    return f"data:{mime};base64," + base64.b64encode(raw).decode("utf-8")
-
-def _stack_images_same_size(tensors: T.List[torch.Tensor], debug: bool = False) -> torch.Tensor:
-    """
-    Concatenate (B,H,W,C) batches along B. If shapes mismatch, resize to the first image size.
-    """
+def stack_images_same_size(tensors: T.List[torch.Tensor], debug: bool = False) -> torch.Tensor:
+    """Concatenate (B,H,W,C) batches along B. If shapes mismatch, resize to the first image size."""
     if not tensors:
         raise RuntimeError("No images to stack.")
     try:
@@ -115,10 +87,52 @@ def _stack_images_same_size(tensors: T.List[torch.Tensor], debug: bool = False) 
             fixed.append(pil_to_tensor(rp))
         return torch.cat(fixed, dim=0)
 
-# --------------------------- Main Node ---------------------------
+def _extract_image_bytes_from_part(part) -> T.Optional[bytes]:
+    try:
+        inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
+        if inline is not None:
+            data = getattr(inline, "data", None)
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+            if isinstance(data, str):
+                try:
+                    return base64.b64decode(data, validate=False)
+                except Exception:
+                    return None
+    except Exception:
+        pass
+    if isinstance(part, dict):
+        blob = None
+        if "inline_data" in part and isinstance(part["inline_data"], dict):
+            blob = part["inline_data"].get("data")
+        elif "inlineData" in part and isinstance(part["inlineData"], dict):
+            blob = part["inlineData"].get("data")
+        if isinstance(blob, (bytes, bytearray)):
+            return bytes(blob)
+        if isinstance(blob, str):
+            try:
+                return base64.b64decode(blob, validate=False)
+            except Exception:
+                return None
+    return None
+
+def _extract_text_from_part(part) -> T.Optional[str]:
+    try:
+        txt = getattr(part, "text", None)
+        if txt is not None:
+            return str(txt)
+    except Exception:
+        pass
+    if isinstance(part, dict) and "text" in part and part["text"] is not None:
+        return str(part["text"])
+    return None
+
+def _data_url(mime: str, raw: bytes) -> str:
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("utf-8")
+
+# ----------------- main node -----------------
 
 class PVL_Google_NanoBanana_Multi_API:
-    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -135,98 +149,179 @@ class PVL_Google_NanoBanana_Multi_API:
                 "image_6": ("IMAGE",),
                 "image_7": ("IMAGE",),
                 "image_8": ("IMAGE",),
-                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2 — works for both Google & FAL"}),
+                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2"}),
                 "model": ("STRING", {"default": DEFAULT_MODEL}),
                 "endpoint_override": ("STRING", {"default": ""}),
-                "api_key": ("STRING", {"default": "", "multiline": False,
+                "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "control_after_generate": (["fixed", "randomize"], {"default": "randomize"}),
-                                      "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "output_format": (["png", "jpeg"], {"default": "png"}),
                 "capture_text_output": ("BOOLEAN", {"default": False}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
                 "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
+                "request_id": ("STRING", {"default": ""}),
                 "debug_log": ("BOOLEAN", {"default": False}),
+                # FAL flags
                 "use_fal_fallback": ("BOOLEAN", {"default": True}),
                 "force_fal": ("BOOLEAN", {"default": False}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
-                "fal_api_key": ("STRING", {"default": "", "multiline": False,
-                                          "placeholder": "Leave empty to use FAL_KEY"}),
-                "fal_route": ("STRING", {"default": "fal-ai/nano-banana/edit"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "fal_api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use FAL_KEY"}),
+                "fal_route_img2img": ("STRING", {"default": "fal-ai/nano-banana/edit"}),
+                "fal_route_txt2img": ("STRING", {"default": "fal-ai/nano-banana"}),
             }
         }
-    
+
     RETURN_TYPES = ("STRING", "IMAGE",)
     RETURN_NAMES = ("text", "images")
     FUNCTION = "run"
     CATEGORY = NODE_CATEGORY
-    
-    # ------------------------- INTERNAL HELPERS -------------------------
-    
+
+    # -------- helpers --------
+
     def _make_client(self, api_key: str, endpoint_override: str):
-        from google import genai
-        from google.genai import types
-        
+        try:
+            from google import genai
+            from google.genai import types
+        except Exception as e:
+            raise RuntimeError("Google GenAI SDK not installed. Run: pip install google-genai") from e
+
         http_options = None
         if endpoint_override.strip():
             try:
                 http_options = types.HttpOptions(base_url=endpoint_override.strip())
             except Exception:
                 http_options = None
-        
+
         if http_options is not None:
-            return genai.Client(api_key=api_key, http_options=http_options)
-        return genai.Client(api_key=api_key)
-    
+            client = genai.Client(api_key=api_key, http_options=http_options)
+        else:
+            client = genai.Client(api_key=api_key)
+
+        return client
+
+    def _collect_image_tensors(self, imgs: T.List[T.Optional[torch.Tensor]]) -> T.List[torch.Tensor]:
+        out: T.List[torch.Tensor] = []
+        for img in imgs:
+            if img is not None and torch.is_tensor(img) and img.numel() > 0:
+                out.append(img)
+        return out
+
     def _build_parts(self, prompt: str, image_tensors: T.List[torch.Tensor], mime: str):
         parts: T.List[dict] = []
-        
         if prompt and prompt.strip():
             parts.append({"text": prompt})
-        
+
         for img_tensor in image_tensors:
-            if img_tensor.ndim == 4:
-                for i in range(img_tensor.shape[0]):
-                    single_img = img_tensor[i:i+1]
-                    pil = tensor_to_pil(single_img)
-                    parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
-            else:
-                pil = tensor_to_pil(img_tensor)
+            batch = img_tensor if img_tensor.ndim == 4 else img_tensor.unsqueeze(0)
+            for i in range(batch.shape[0]):
+                pil = tensor_to_pil(batch[i:i+1])
                 parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
-        
         return parts
-    
+
+    def _build_config(self, want_text: bool, aspect_ratio: str):
+        """Build a config object for Gemini (google-genai SDK) or a fallback dict."""
+        try:
+            from google.genai import types
+            cfg = types.GenerateContentConfig(
+                top_p=float(_TOP_P),
+                top_k=int(_TOP_K),
+                max_output_tokens=int(_MAX_TOKENS),
+                response_modalities=["IMAGE", "TEXT"] if want_text else ["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+                safety_settings=[
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ],
+            )
+            return cfg
+        except Exception:
+            # Fallback dict config
+            return {
+                "top_p": float(_TOP_P),
+                "top_k": int(_TOP_K),
+                "max_output_tokens": int(_MAX_TOKENS),
+                "response_modalities": ["IMAGE", "TEXT"] if want_text else ["IMAGE"],
+                "image_config": {"aspect_ratio": aspect_ratio},
+                "safety_settings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ],
+            }
+
     def _build_call_prompts(self, base_prompts: T.List[str], num_images: int, debug: bool) -> T.List[str]:
         """
         Maps prompts to calls according to the agreed rule:
-        - If len(prompts) >= num_images → take first num_images
-        - If len(prompts) < num_images → repeat the *last* prompt to fill
+        - If len(prompts) >= num_images: take first num_images
+        - If len(prompts) < num_images: repeat the last prompt to fill N
         """
         N = max(1, int(num_images))
-        
         if not base_prompts:
-            return []
-        
+            return [""]
         if len(base_prompts) >= N:
             call_prompts = base_prompts[:N]
         else:
             if debug:
                 print(f"[PVL NODE] Provided {len(base_prompts)} prompts but num_images={N}. "
                       f"Reusing the last prompt for remaining calls.")
-                print(f"[PVL WARNING] prompt list shorter than num_images: {len(base_prompts)} < {N}. "
+                print(f"[PVL WARNING] prompt list shorter than num_images ({len(base_prompts)} < {N}). "
                       f"Last entry will be reused for the remaining {N - len(base_prompts)} calls.")
-            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
-        
+            call_prompts = base_prompts + [base_prompts[-1] * 1] * (N - len(base_prompts))
         if debug:
             for i, cp in enumerate(call_prompts, 1):
                 show = cp if len(cp) <= 160 else (cp[:157] + "...")
-                print(f"[PVL NODE] Call #{i} prompt: {show}")
-        
+                print(f"[PVL NODE] Call {i} prompt: {show}")
         return call_prompts
-    
-    # -------- FAL API - TWO PHASE EXECUTION --------
-    
+
+    def _single_google_call(self, client, model: str, parts: list, cfg, request_id: str, debug: bool):
+        kwargs = {}
+        try:
+            from google.genai import types
+            if request_id.strip():
+                kwargs["request_options"] = types.RequestOptions(request_id=request_id.strip())
+        except Exception:
+            pass
+        resp = client.models.generate_content(
+            model=model,
+            contents=[{"role": "user", "parts": parts}],
+            config=cfg,
+            **kwargs
+        )
+        imgs, texts = [], []
+        cands = getattr(resp, "candidates", None) or []
+        for cand in cands:
+            content = getattr(cand, "content", None)
+            finish_reason = getattr(cand, "finish_reason", None)
+            if debug:
+                try:
+                    um = getattr(resp, "usage_metadata", None)
+                    if um is not None:
+                        print("[PVL Debug] usage_metadata:", getattr(um, "__dict__", str(um)))
+                    print(f"[PVL Debug] finish_reason: {finish_reason}")
+                except Exception:
+                    pass
+            if content is None:
+                continue
+            pparts = getattr(content, "parts", []) or []
+            for p in pparts:
+                blob = _extract_image_bytes_from_part(p)
+                if blob:
+                    try:
+                        pil = Image.open(io.BytesIO(blob)).convert("RGB")
+                        imgs.append(pil_to_tensor(pil))
+                    except Exception as ex:
+                        if debug:
+                            print("[PVL Debug] image decode error:", ex)
+                else:
+                    t = _extract_text_from_part(p)
+                    if t:
+                        texts.append(t)
+        return imgs, texts, resp
+
+    # -------- FAL Queue API - TWO PHASE EXECUTION --------
+
     def _fal_submit_only(self, route: str, prompt: str, image_tensors: T.List[torch.Tensor],
                          mime: str, fal_key: str, timeout: int, debug: bool,
                          output_format: str, aspect_ratio: str = "1:1", sync_mode: bool = False):
@@ -236,56 +331,54 @@ class PVL_Google_NanoBanana_Multi_API:
         """
         if not fal_key:
             raise RuntimeError("FAL requested but FAL_KEY is missing.")
-        
+
         # Convert any input images to data URLs
-        data_urls = []
+        data_urls: T.List[str] = []
         for t in image_tensors:
-            if t.ndim == 4:
-                for i in range(t.shape[0]):
-                    single_img = t[i:i+1]
-                    pil = tensor_to_pil(single_img)
-                    raw = encode_pil_bytes(pil, mime)
-                    data_urls.append(_data_url(mime, raw))
-            else:
-                pil = tensor_to_pil(t)
+            batch = t if t.ndim == 4 else t.unsqueeze(0)
+            for i in range(batch.shape[0]):
+                pil = tensor_to_pil(batch[i:i+1])
                 raw = encode_pil_bytes(pil, mime)
                 data_urls.append(_data_url(mime, raw))
-        
+
         base = "https://queue.fal.run"
         submit_url = f"{base}/{route.strip()}"
         headers = {"Authorization": f"Key {fal_key}"}
-        
+
         payload = {
             "prompt": prompt or "",
-            "image_urls": data_urls,
             "num_images": 1,
-            "output_format": ("png" if str(output_format).lower() == "png" else "jpeg"),
+            "output_format": "png" if str(output_format).lower() == "png" else "jpeg",
             "aspect_ratio": aspect_ratio,
             "sync_mode": sync_mode,
         }
-        
+
+        # Only add image_urls for img2img route (or if we have images at all)
+        if data_urls:
+            payload["image_urls"] = data_urls
+
         if debug:
             print(f"[FAL SUBMIT] prompt: {prompt[:60]}... sync_mode={sync_mode}")
-        
-        r = requests.post(submit_url, headers=headers, json=payload, timeout=timeout)
-        if not r.ok:
-            raise RuntimeError(f"FAL submit error {r.status_code}: {r.text}")
-        
-        sub = r.json()
+
+        rr = requests.post(submit_url, headers=headers, json=payload, timeout=timeout)
+        if rr.status_code != 200:
+            raise RuntimeError(f"FAL submit error {rr.status_code}: {rr.text}")
+
+        sub = rr.json()
         req_id = sub.get("request_id")
         if not req_id:
             raise RuntimeError("FAL did not return a request_id")
-        
+
         status_url = sub.get("status_url") or f"{base}/{route.strip()}/requests/{req_id}/status"
         resp_url = sub.get("response_url") or f"{base}/{route.strip()}/requests/{req_id}"
-        
+
         return {
             "request_id": req_id,
             "status_url": status_url,
             "response_url": resp_url,
             "prompt": prompt
         }
-    
+
     def _fal_poll_and_fetch(self, request_info: dict, fal_key: str, timeout: int, debug: bool):
         """
         Phase 2: Poll a single FAL request until complete and fetch the result.
@@ -295,269 +388,283 @@ class PVL_Google_NanoBanana_Multi_API:
         status_url = request_info["status_url"]
         resp_url = request_info["response_url"]
         req_id = request_info["request_id"]
-        
+
         if debug:
             print(f"[FAL POLL] request_id={req_id[:16]}...")
-        
-        # Poll for completion
+
         deadline = time.time() + timeout
+        completed = False
         while time.time() < deadline:
-            sr = requests.get(status_url, headers=headers, timeout=10)
-            if sr.ok and sr.json().get("status") == "COMPLETED":
-                break
+            try:
+                sr = requests.get(status_url, headers=headers, timeout=min(10, timeout))
+                if sr.ok and sr.json().get("status") == "COMPLETED":
+                    completed = True
+                    break
+            except Exception as e:
+                if debug:
+                    print(f"[FAL POLL] Status check error: {e}")
             time.sleep(0.6)
-        
-        # Fetch result
-        rr = requests.get(resp_url, headers=headers, timeout=15)
+
+        if not completed:
+            raise RuntimeError(f"FAL request {req_id[:16]} timed out after {timeout}s")
+
+        rr = requests.get(resp_url, headers=headers, timeout=min(15, timeout))
         if not rr.ok:
             raise RuntimeError(f"FAL result fetch error {rr.status_code}: {rr.text}")
-        
-        rdata = rr.json()
+
+        data = rr.json()
         if debug:
             print(f"[FAL RESULT] request_id={req_id[:16]}... status=COMPLETED")
-        
+
         # Extract response data
-        buckets = []
-        resp = rdata.get("response") if isinstance(rdata, dict) else None
-        if resp is None and isinstance(rdata, dict):
-            resp = rdata
-        
+        resp = data.get("response") if isinstance(data, dict) else None
+        if resp is None and isinstance(data, dict):
+            resp = data
+
+        images_out: T.List[torch.Tensor] = []
+        buckets: T.List[T.Union[str, dict]] = []
+
         if isinstance(resp, dict):
             for key in ("images", "outputs", "artifacts"):
                 val = resp.get(key)
                 if isinstance(val, list):
                     buckets.extend(val)
-            
             for key in ("image", "output", "result"):
                 val = resp.get(key)
                 if isinstance(val, (str, dict)):
                     buckets.append(val)
-        
-        out = []
+
         for item in buckets:
             try:
-                url = item if isinstance(item, str) \
-                    else (item.get("url") or item.get("data") or item.get("image"))
-                if not url:
+                url_or_data = item if isinstance(item, str) else (item.get("url") or item.get("data") or item.get("image"))
+                if not isinstance(url_or_data, str):
                     continue
-                
-                if url.startswith("data:image/"):
-                    blob = base64.b64decode(url.split(",", 1)[1])
+                if url_or_data.startswith("data:image/"):
+                    b64 = url_or_data.split(",", 1)[1]
+                    blob = base64.b64decode(b64)
                 else:
-                    ir = requests.get(url, timeout=timeout)
+                    ir = requests.get(url_or_data, timeout=min(15, timeout))
                     if not ir.ok:
                         continue
                     blob = ir.content
-                
                 pil = Image.open(io.BytesIO(blob)).convert("RGB")
-                out.append(pil_to_tensor(pil))
+                images_out.append(pil_to_tensor(pil))
             except Exception as ex:
                 if debug:
-                    print(f"[FAL decode fail] {ex}")
-        
-        if not out:
-            raise RuntimeError(f"FAL returned no images for request_id={req_id}")
-        
+                    print("[FAL] image decode failed:", ex)
+
         description = resp.get("description", "") if isinstance(resp, dict) else ""
-        return out[0], description
-    
+
+        if not images_out:
+            raise RuntimeError(f"FAL returned no images for request_id={req_id}")
+
+        return images_out[0], description
+
     # --------------------------- RUN MAIN -----------------------------
-    
-    def run(self, prompt: str, delimiter: str,
-            image_1=None, image_2=None, image_3=None, image_4=None,
-            image_5=None, image_6=None, image_7=None, image_8=None,
-            aspect_ratio: str = "1:1",
-            model: str = DEFAULT_MODEL, endpoint_override: str = "",
-            capture_text_output: bool = False, num_images: int = 1,
-            timeout_sec: int = 120, debug_log: bool = False,
-            use_fal_fallback: bool = False, force_fal: bool = False,
-            sync_mode: bool = False,
-            fal_api_key: str = "", fal_route: str = "fal-ai/nano-banana/edit",
-                seed: int = 0,
-                control_after_generate: str = "randomize"):
-        
-        # --- Validate aspect ratio (for Google & FAL) ---
-        ar_original = aspect_ratio.strip()
-        valid_ratios = {"21:9","1:1","4:3","3:2","2:3","5:4","4:5","3:4","16:9","9:16"}
-        if not ar_original or ar_original not in valid_ratios:
-            print(f"[PVL WARNING] Invalid or missing aspect_ratio '{ar_original}', using 1:1.")
+
+    def run(
+        self,
+        prompt: str,
+        delimiter: str = "[*]",
+        image_1: T.Optional[torch.Tensor] = None,
+        image_2: T.Optional[torch.Tensor] = None,
+        image_3: T.Optional[torch.Tensor] = None,
+        image_4: T.Optional[torch.Tensor] = None,
+        image_5: T.Optional[torch.Tensor] = None,
+        image_6: T.Optional[torch.Tensor] = None,
+        image_7: T.Optional[torch.Tensor] = None,
+        image_8: T.Optional[torch.Tensor] = None,
+        aspect_ratio: str = "1:1",
+        model: str = DEFAULT_MODEL,
+        endpoint_override: str = "",
+        api_key: str = "",
+        seed: int = 0,
+        output_format: str = "png",
+        capture_text_output: bool = False,
+        num_images: int = 1,
+        timeout_sec: int = 120,
+        request_id: str = "",
+        debug_log: bool = False,
+        use_fal_fallback: bool = True,
+        force_fal: bool = False,
+        sync_mode: bool = False,
+        fal_api_key: str = "",
+        fal_route_img2img: str = "fal-ai/nano-banana/edit",
+        fal_route_txt2img: str = "fal-ai/nano-banana",
+    ):
+        start_time = time.time()
+
+        # Validate aspect_ratio
+        if aspect_ratio.strip() not in _VALID_ASPECTS:
+            print(f"[PVL WARNING] Invalid or missing aspect_ratio '{aspect_ratio}', defaulting to 1:1.")
             aspect_ratio = "1:1"
-        else:
-            aspect_ratio = ar_original
-        
-        # --- Regex-based prompt splitting (with safe fallback to literal split) ---
+
+        # Split prompts using regex delimiter
         try:
             base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
         except re.error:
             print(f"[PVL WARNING] Invalid regex pattern '{delimiter}', using literal split.")
             base_prompts = [p.strip() for p in prompt.split(delimiter) if str(p).strip()]
-        
+
         if not base_prompts:
             raise RuntimeError("No valid prompts provided.")
-        
-        # Collect any provided images (tensors) in order
-        image_tensors: T.List[torch.Tensor] = []
-        for img in [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8]:
-            if img is not None and torch.is_tensor(img):
-                image_tensors.append(img)
-        
-        # Map provided prompts to num_images calls
+
+        # Map prompts to num_images calls
         call_prompts = self._build_call_prompts(base_prompts, num_images, debug_log)
-        
-        input_mime = "image/png" if output_format.lower() == "png" else "image/jpeg"
-        want_text = bool(capture_text_output)
-        
-        # ---------------- FAL-only path (TRUE PARALLEL) ----------------
-        if force_fal:
-            fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
-            if not fal_key:
-                raise RuntimeError("force_fal=True but no FAL_KEY provided.")
-            
-            if debug_log:
-                print(f"[FAL] Submitting {len(call_prompts)} requests...")
-            
-            # PHASE 1: Submit all requests (fast, non-blocking)
-            request_infos = []
-            for p in call_prompts:
-                req_info = self._fal_submit_only(fal_route, p, image_tensors,
-                                                 input_mime, fal_key, timeout_sec, 
-                                                 debug_log, output_format, 
-                                                 aspect_ratio, sync_mode)
-                request_infos.append(req_info)
-            
-            if debug_log:
-                print(f"[FAL] All {len(request_infos)} requests submitted. Polling for results...")
-            
-            # PHASE 2: Poll all requests in parallel
-            results, texts = [], []
-            with ThreadPoolExecutor(max_workers=min(len(request_infos), 6)) as ex:
-                futs = {
-                    ex.submit(self._fal_poll_and_fetch, req_info, fal_key, 
-                             timeout_sec, debug_log): req_info
-                    for req_info in request_infos
-                }
-                for fut in as_completed(futs):
-                    img, t = fut.result()
-                    results.append(img)
-                    if t:
-                        texts.append(t)
-            
-            images_tensor = _stack_images_same_size(results, debug_log)
-            text_out = "\n".join(texts) if want_text else ""
-            return text_out, images_tensor
-        
-        # ---------------- Google path (with optional FAL fallback) ----------------
+
         key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
-        if not key:
-            raise RuntimeError("Gemini API key missing. Pass api_key or set GEMINI_API_KEY.")
-        
-        client = self._make_client(key, endpoint_override)
-        
-        def google_call(p: str, debug: bool):
-            parts = self._build_parts(p, image_tensors, input_mime)
-            
-            cfg = types.GenerateContentConfig(
-                top_p=_TOP_P,
-                top_k=_TOP_K,
-                max_output_tokens=_MAX_TOKENS,
-                response_modalities=["Image"],
-                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
-            )
-            
+        input_mime = "image/png" if str(output_format).lower() == "png" else "image/jpeg"
+        want_text = bool(capture_text_output)
+
+        # Collect provided image tensors (any of 8 slots)
+        image_tensors = self._collect_image_tensors([image_1, image_2, image_3, image_4,
+                                                     image_5, image_6, image_7, image_8])
+
+        # Decide FAL route based on presence of input images
+        route_to_use = fal_route_img2img if (len(image_tensors) > 0) else fal_route_txt2img
+
+        # Helper for PARALLEL FAL execution (submit all, then poll all)
+        def parallel_fal_execution(prompts_list, fal_key_str, route, debug):
             if debug:
-                print(f"[GOOGLE SUBMIT] prompt: {p[:100]}...")
-            
-            resp = client.models.generate_content(
-                model=model,
-                contents=[{"role": "user", "parts": parts}],
-                config=cfg,
-            )
-            
-            imgs, texts = [], []
-            for cand in getattr(resp, "candidates", []) or []:
-                content = getattr(cand, "content", None)
-                parts_out = getattr(content, "parts", []) if content else []
-                
-                for prt in parts_out:
-                    blob = _extract_image_bytes_from_part(prt)
-                    if blob:
-                        try:
-                            pil = Image.open(io.BytesIO(blob)).convert("RGB")
-                            imgs.append(pil_to_tensor(pil))
-                        except Exception as e:
-                            if debug:
-                                print(f"[Decode fail] {e}")
-                    else:
-                        t = _extract_text_from_part(prt)
-                        if t:
-                            texts.append(t)
-            
+                print(f"[FAL] Submitting {len(prompts_list)} requests in parallel...")
+            # PHASE 1: submit in parallel
+            submit_results = []
+            with ThreadPoolExecutor(max_workers=min(len(prompts_list), 6)) as ex:
+                submit_futs = {
+                    ex.submit(self._fal_submit_only, route, p, image_tensors, input_mime,
+                              fal_key_str, timeout_sec, debug, output_format, aspect_ratio, sync_mode): p
+                    for p in prompts_list
+                }
+                for fut in as_completed(submit_futs):
+                    try:
+                        req_info = fut.result()
+                        submit_results.append(req_info)
+                    except Exception as e:
+                        if debug:
+                            print(f"[FAL SUBMIT ERROR] {e}")
+            if not submit_results:
+                raise RuntimeError("All FAL submission requests failed")
             if debug:
-                print(f"[GOOGLE RESULT] Found {len(imgs)} images")
-            
-            return imgs, texts
-        
-        out_imgs: T.List[torch.Tensor] = []
-        out_texts: T.List[str] = []
-        
-        with ThreadPoolExecutor(max_workers=min(len(call_prompts), 6)) as ex:
-            futs = {ex.submit(google_call, p, debug_log): p for p in call_prompts}
-            for fut in as_completed(futs):
-                imgs, texts = fut.result()
-                if imgs:
-                    out_imgs.append(imgs[0])
-                if texts:
-                    out_texts.extend(texts)
-        
-        if not out_imgs:
-            if use_fal_fallback:
-                fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
-                if not fal_key:
-                    raise RuntimeError("Google returned no images and FAL fallback has no FAL_KEY.")
-                
-                if debug_log:
-                    print(f"[FAL FALLBACK] Submitting {len(call_prompts)} requests...")
-                
-                # PHASE 1: Submit all requests
-                request_infos = []
-                for p in call_prompts:
-                    req_info = self._fal_submit_only(fal_route, p, image_tensors,
-                                                     input_mime, fal_key, timeout_sec,
-                                                     debug_log, output_format,
-                                                     aspect_ratio, sync_mode)
-                    request_infos.append(req_info)
-                
-                if debug_log:
-                    print(f"[FAL FALLBACK] All requests submitted. Polling for results...")
-                
-                # PHASE 2: Poll all requests in parallel
-                results, texts = [], []
-                with ThreadPoolExecutor(max_workers=min(len(request_infos), 6)) as ex:
-                    futs = {
-                        ex.submit(self._fal_poll_and_fetch, req_info, fal_key,
-                                 timeout_sec, debug_log): req_info
-                        for req_info in request_infos
-                    }
-                    for fut in as_completed(futs):
+                print(f"[FAL] {len(submit_results)} requests submitted successfully. Polling for results...")
+
+            # PHASE 2: poll in parallel
+            results, texts = [], []
+            failed_count = 0
+            with ThreadPoolExecutor(max_workers=min(len(submit_results), 6)) as ex:
+                poll_futs = {
+                    ex.submit(self._fal_poll_and_fetch, req_info, fal_key_str, timeout_sec, debug): req_info
+                    for req_info in submit_results
+                }
+                for fut in as_completed(poll_futs):
+                    try:
                         img, t = fut.result()
                         results.append(img)
                         if t:
                             texts.append(t)
-                
-                images_tensor = _stack_images_same_size(results, debug_log)
-                combo_texts = out_texts + texts
-                text_out = "\n".join(combo_texts) if want_text else ""
+                    except Exception as e:
+                        failed_count += 1
+                        if debug:
+                            print(f"[FAL POLL ERROR] {e}")
+            if not results:
+                raise RuntimeError(f"All FAL requests failed during polling ({failed_count} failures)")
+            if failed_count > 0:
+                print(f"[PVL WARNING] {failed_count}/{len(submit_results)} FAL requests failed, continuing with {len(results)} successful results")
+            return results, texts
+
+        # ---- CASE: FAL only ----
+        if force_fal:
+            fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
+            if not fal_key:
+                raise RuntimeError("force_fal=True but FAL_KEY missing.")
+            results, texts = parallel_fal_execution(call_prompts, fal_key, route_to_use, debug_log)
+            images_tensor = stack_images_same_size(results, debug_log)
+            text_out = "\n".join(texts) if want_text else ""
+            elapsed = time.time() - start_time
+            print(f"[PVL NODE] Execution took {elapsed:.2f}s")
+            return text_out, images_tensor
+
+        # ---- Google path ----
+        if not key:
+            if use_fal_fallback:
+                fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
+                if not fal_key:
+                    raise RuntimeError("GEMINI_API_KEY missing and FAL_KEY missing.")
+                results, texts = parallel_fal_execution(call_prompts, fal_key, route_to_use, debug_log)
+                images_tensor = stack_images_same_size(results, debug_log)
+                text_out = "\n".join(texts) if want_text else ""
+                elapsed = time.time() - start_time
+                print(f"[PVL NODE] Execution took {elapsed:.2f}s")
                 return text_out, images_tensor
-            
-            raise RuntimeError("Gemini returned no images")
-        
-        images_tensor = _stack_images_same_size(out_imgs, debug_log)
+            raise RuntimeError("Gemini API key missing. Pass api_key or set GEMINI_API_KEY.")
+
+        client = self._make_client(key, endpoint_override)
+        cfg = self._build_config(want_text, aspect_ratio)
+
+        if debug_log:
+            print(f"[PVL Debug] Processing {len(call_prompts)} prompts in parallel")
+
+        def google_call(p: str, debug: bool):
+            parts = self._build_parts(p, image_tensors, input_mime)
+            g_imgs, g_texts, _resp = self._single_google_call(client, model, parts, cfg, request_id, debug)
+            return g_imgs, g_texts
+
+        out_imgs: T.List[torch.Tensor] = []
+        out_texts: T.List[str] = []
+        failed_google = 0
+
+        with ThreadPoolExecutor(max_workers=min(len(call_prompts), 6)) as ex:
+            futs = {ex.submit(google_call, p, debug_log): p for p in call_prompts}
+            for fut in as_completed(futs):
+                try:
+                    imgs, texts = fut.result()
+                    if imgs:
+                        out_imgs.append(imgs[0])
+                    out_texts.extend(texts)
+                except Exception as e:
+                    failed_google += 1
+                    if debug_log:
+                        print(f"[GOOGLE ERROR] {e}")
+
+        if failed_google > 0:
+            print(f"[PVL WARNING] {failed_google}/{len(call_prompts)} Google requests failed")
+
+        # If Google failed to produce images, optionally fallback to FAL (TRUE PARALLEL)
+        if not out_imgs:
+            if use_fal_fallback:
+                fal_key = (fal_api_key or os.getenv("FAL_KEY", "")).strip()
+                if not fal_key:
+                    raise RuntimeError("Google returned no images and FAL_KEY is missing for fallback.")
+                results, texts = parallel_fal_execution(call_prompts, fal_key, route_to_use, debug_log)
+                images_tensor = stack_images_same_size(results, debug_log)
+                if want_text:
+                    combined_text = ""
+                    if out_texts:
+                        combined_text += "\n\n--- Google ---\n\n" + "\n".join(out_texts)
+                    if texts:
+                        combined_text += "\n\n--- FAL ---\n\n" + "\n".join(texts)
+                    text_out = combined_text
+                else:
+                    text_out = ""
+                elapsed = time.time() - start_time
+                print(f"[PVL NODE] Execution took {elapsed:.2f}s")
+                return text_out, images_tensor
+            else:
+                raise RuntimeError("Gemini returned no images")
+
+        # Merge Google images
+        images_tensor = stack_images_same_size(out_imgs, debug_log)
+        if images_tensor.ndim == 3:
+            images_tensor = images_tensor.unsqueeze(0)
+
         text_out = "\n".join(out_texts) if (want_text and out_texts) else ""
-        
+
         if text_out and debug_log:
-            print(f"[PVL Google NanoBanana Output]:\n{text_out}\n")
-        
+            print("[PVL Google NanoBanana Multi Output]:\n" + text_out)
+
+        elapsed = time.time() - start_time
+        print(f"[PVL NODE] Execution took {elapsed:.2f}s")
         return text_out, images_tensor
+
 
 NODE_CLASS_MAPPINGS = {"PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API}
 NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Google_NanoBanana_Multi_API": NODE_NAME}

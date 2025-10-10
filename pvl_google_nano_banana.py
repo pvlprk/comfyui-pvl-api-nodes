@@ -1,13 +1,8 @@
 # pvl_google_nano_banana.py
-
 # Node: PVL Google Nano-Banana API (Gemini + FAL) — with delimiter support + parallel prompts
-
 # Author: PVL
 # License: MIT
-
-# Requires:
-# pip install google-genai
-
+#
 # Features:
 # - Regex-based delimiter input for splitting prompts (default: [*])
 # - Parallel API calls for multiple prompts
@@ -19,6 +14,9 @@
 # - force_fal toggle to always use FAL (bypass Google).
 # - Dual FAL routes: img2img (edit) vs txt2img (generate) chosen automatically.
 # - Individual request error handling with partial results support.
+#
+# Requires:
+#   pip install google-genai requests pillow numpy torch
 
 import os
 import io
@@ -28,6 +26,7 @@ import typing as T
 import time
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 import numpy as np
 from PIL import Image
@@ -130,8 +129,9 @@ def _extract_text_from_part(part) -> T.Optional[str]:
 def _data_url(mime: str, raw: bytes) -> str:
     return f"data:{mime};base64," + base64.b64encode(raw).decode("utf-8")
 
+# ----------------- main node -----------------
+
 class PVL_Google_NanoBanana_API:
-    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -146,7 +146,7 @@ class PVL_Google_NanoBanana_API:
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                                "output_format": (["png", "jpeg"], {"default": "png"}),
+                "output_format": (["png", "jpeg"], {"default": "png"}),
                 "capture_text_output": ("BOOLEAN", {"default": False}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
                 "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
@@ -203,10 +203,11 @@ class PVL_Google_NanoBanana_API:
                 parts.append({"inline_data": {"mime_type": mime, "data": encode_pil_bytes(pil, mime)}})
         
         return parts
-    
+
+    def _build_config(self, want_text: bool, aspect_ratio: str):
+        """Build a config object for Gemini (google-genai SDK) or a fallback dict."""
         try:
             from google.genai import types
-            
             cfg = types.GenerateContentConfig(
                 top_p=float(_TOP_P),
                 top_k=int(_TOP_K),
@@ -220,7 +221,6 @@ class PVL_Google_NanoBanana_API:
                     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
                 ],
             )
-            
             return cfg
         except Exception:
             # Fallback dict config
@@ -257,7 +257,7 @@ class PVL_Google_NanoBanana_API:
                       f"Reusing the last prompt for remaining calls.")
                 print(f"[PVL WARNING] prompt list shorter than num_images ({len(base_prompts)} < {N}). "
                       f"Last entry will be reused for the remaining {N - len(base_prompts)} calls.")
-            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
+            call_prompts = base_prompts + [base_prompts[-1] * 1] * (N - len(base_prompts))
         
         if debug:
             for i, cp in enumerate(call_prompts, 1):
@@ -478,6 +478,7 @@ class PVL_Google_NanoBanana_API:
         model: str = DEFAULT_MODEL,
         endpoint_override: str = "",
         api_key: str = "",
+        seed: int = 0,  # accepted but not used; ComfyUI may pass it
         output_format: str = "png",
         capture_text_output: bool = False,
         num_images: int = 1,
