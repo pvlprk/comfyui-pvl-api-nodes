@@ -18,7 +18,7 @@ except Exception:
 COMFYDEPLOY_QUEUE_URL = "https://api.comfydeploy.com/api/run/deployment/queue"
 COMFYDEPLOY_RUN_URL = "https://api.comfydeploy.com/api/run/{run_id}"
 POLL_INTERVAL = 3.0           # seconds between polls
-MAX_POLL_SECONDS = 150        # total poll duration
+MAX_POLL_SECONDS = 200        # total poll duration
 
 class PVL_Comfydeploy_Avatar_PulID_API:
     """
