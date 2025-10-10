@@ -40,7 +40,8 @@ from .pvl_fal_depth_anything_v2 import PVL_fal_DepthAnythingV2_API
 from .pvl_google_nano_banana_mandatory_img import PVL_Google_NanoBanana_API_mandatory_IMG
 from .pvl_fal_flux_with_lora_pulid import PVL_fal_FluxWithLoraPulID_API
 from .pvl_fal_ministudio_avatar import PVL_fal_FluxDevPulidAvatar_API
-
+from .pvl_comfydeploy_avatar_pulid import PVL_Comfydeploy_Avatar_PulID_API
+    
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
     "PVL ComfyDeploy API Caller": ComfyDeployNode,
@@ -84,6 +85,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Google_NanoBanana_API_mandatory_IMG": PVL_Google_NanoBanana_API_mandatory_IMG,
     "PVL_fal_FluxWithLoraPulID_API": PVL_fal_FluxWithLoraPulID_API,
     "PVL_fal_FluxDevPulidAvatar_API": PVL_fal_FluxDevPulidAvatar_API,
+    "PVL_Comfydeploy_Avatar_PulID_API": PVL_Comfydeploy_Avatar_PulID_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -128,4 +130,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Google_NanoBanana_API_mandatory_IMG": "PVL Google Nano-Banana API mandatory IMG",
     "PVL_fal_FluxWithLoraPulID_API": "PVL Flux Lora PulID (fal.ai)",
     "PVL_fal_FluxDevPulidAvatar_API": "PVL Flux Dev Pulid Avatar (fal.ai)",
+    "PVL_Comfydeploy_Avatar_PulID_API": "PVL ComfyDeploy Avatar PulID API",
 }
