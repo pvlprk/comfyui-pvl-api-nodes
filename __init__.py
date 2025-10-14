@@ -45,6 +45,8 @@ from .pvl_gemini_api_avatar_special import PVL_Gemini_API_avatar_special
 from .pvl_edge_extend import PVL_EdgeExtend
 from .pvl_split_string import PVL_SplitString
 from .pvl_math_condition import PVL_MathCondition
+from .pvl_batch_any import PVL_BatchAny
+from .pvl_string_to_number import PVL_StringToNumber
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -94,6 +96,8 @@ NODE_CLASS_MAPPINGS = {
     "PVL_EdgeExtend": PVL_EdgeExtend,
     "PVL_SplitString": PVL_SplitString,
     "PVL_MathCondition": PVL_MathCondition,
+    "PVL_BatchAny": PVL_BatchAny,
+    "PVL_StringToNumber": PVL_StringToNumber,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -142,5 +146,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)",
     "PVL_EdgeExtend": "PVL Edge Extend",
     "PVL_SplitString": "PVL — Split String",
-    "PVL_MathCondition": "PVL — Math Condition"
+    "PVL_MathCondition": "PVL — Math Condition",
+    "PVL_BatchAny": "PVL — Batch Any",
+    "PVL_StringToNumber": "PVL — String To Number",
 }
