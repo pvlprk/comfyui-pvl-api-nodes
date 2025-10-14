@@ -42,6 +42,9 @@ from .pvl_fal_flux_with_lora_pulid import PVL_fal_FluxWithLoraPulID_API
 from .pvl_fal_ministudio_avatar import PVL_fal_FluxDevPulidAvatar_API
 from .pvl_comfydeploy_avatar_pulid import PVL_Comfydeploy_Avatar_PulID_API
 from .pvl_gemini_api_avatar_special import PVL_Gemini_API_avatar_special
+from .pvl_edge_extend import PVL_EdgeExtend
+from .pvl_split_string import PVL_SplitString
+from .pvl_math_condition import PVL_MathCondition
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -88,6 +91,9 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_FluxDevPulidAvatar_API": PVL_fal_FluxDevPulidAvatar_API,
     "PVL_Comfydeploy_Avatar_PulID_API": PVL_Comfydeploy_Avatar_PulID_API,
     "PVL_Gemini_API_avatar_special": PVL_Gemini_API_avatar_special,
+    "PVL_EdgeExtend": PVL_EdgeExtend,
+    "PVL_SplitString": PVL_SplitString,
+    "PVL_MathCondition": PVL_MathCondition,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -134,4 +140,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_FluxDevPulidAvatar_API": "PVL Flux Dev Pulid Avatar (fal.ai)",
     "PVL_Comfydeploy_Avatar_PulID_API": "PVL ComfyDeploy Avatar PulID API",
     "PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)",
+    "PVL_EdgeExtend": "PVL Edge Extend",
+    "PVL_SplitString": "PVL — Split String",
+    "PVL_MathCondition": "PVL — Math Condition"
 }
