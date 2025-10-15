@@ -47,6 +47,7 @@ from .pvl_split_string import PVL_SplitString
 from .pvl_math_condition import PVL_MathCondition
 from .pvl_batch_any import PVL_BatchAny
 from .pvl_string_to_number import PVL_StringToNumber
+from .pvl_math import PVL_Math
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -98,6 +99,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_MathCondition": PVL_MathCondition,
     "PVL_BatchAny": PVL_BatchAny,
     "PVL_StringToNumber": PVL_StringToNumber,
+    "PVL_Math": PVL_Math,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -149,4 +151,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_MathCondition": "PVL — Math Condition",
     "PVL_BatchAny": "PVL — Batch Any",
     "PVL_StringToNumber": "PVL — String To Number",
+    "PVL_Math": "PVL — Math",
 }
