@@ -1,15 +1,7 @@
-
 # pvl_gemini_api_avatar_special.py
 # PVL - Gemini API (Avatar Special)
-# Sends a shared header (sections split by "-----") and splits the FINAL prompt
-# by a split delimiter (default "[*]") across parallel batch calls.
-# - The part BEFORE the last "-----" stays identical for all calls.
-# - The part AFTER the last "-----" is split into prompt1 [*] prompt2 [*] ...
-# - If batch > 1, each parallel call gets a different prompt part.
-# - If there are fewer prompt parts than batch, the last part is reused.
-# - Prints total execution time always, even when debug is off.
-#
-# Inputs compatible with PVL_Gemini_API, but adds "prompt_split_delimiter" and "section_delimiter".
+# Shared header (sections split by "-----") + split the FINAL prompt by "[*]" across parallel calls.
+# Adds Gemini-aware error detection and per-item retry: only failed items are retried each round.
 
 import os, io, time, base64, json, re
 from typing import Any, Dict, Optional, Tuple, List
@@ -34,6 +26,9 @@ HARDCODED_MODELS = [
     "gemini-2.0-flash",
 ]
 
+# -----------------------------
+# Utils
+# -----------------------------
 def _log_debug(debug: bool, *args):
     if debug:
         print("[PVL_GEMINI_SPECIAL]", *args, flush=True)
@@ -98,6 +93,27 @@ def _extract_text(resp_json: Dict[str, Any]) -> str:
     out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
     return out.strip()
 
+# -----------------------------
+# Gemini error detection
+# -----------------------------
+_GOOD_FINISH = {"STOP", "FINISH_REASON_UNSPECIFIED", None}
+
+def _is_blocked_prompt(resp_json: Dict[str, Any]) -> Optional[str]:
+    fb = resp_json.get("promptFeedback") or {}
+    br = fb.get("blockReason") or fb.get("block_reason")
+    if br:
+        return f"Prompt blocked (blockReason={br})"
+    return None
+
+def _finish_reason_error(resp_json: Dict[str, Any]) -> Optional[str]:
+    cands = resp_json.get("candidates") or []
+    if not cands:
+        return "No candidates in response"
+    fr = (cands[0] or {}).get("finishReason") or (cands[0] or {}).get("finish_reason")
+    if fr not in _GOOD_FINISH:
+        return f"Content generation stopped (finishReason={fr})"
+    return None
+
 def _gen_url(model: str, api_version: str) -> str:
     model_path = model if model.startswith("models/") else f"models/{model}"
     return f"{GEMINI_BASE}/{api_version}/{model_path}:generateContent"
@@ -118,9 +134,13 @@ def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: 
         _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
     return resp
 
-def _generate(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
-              pil_img: Optional[Image.Image], tries: int, timeout: int, temperature: float,
-              top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
+                   pil_img: Optional[Image.Image], timeout: int, temperature: float,
+                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+    """
+    One request attempt, Gemini-aware error detection.
+    Returns (ok, text_or_error).
+    """
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
@@ -132,67 +152,68 @@ def _generate(api_key: str, model: str, instructions: Optional[str], prompt: Opt
 
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
-    def try_one_endpoint(api_ver: str) -> Tuple[bool, str, Optional[int]]:
+    def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int]]:
         url = _gen_url(model, api_ver)
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
-            payload["system_instruction"] = sys_instr
-        resp = _post(url, payload, api_key, timeout, debug, "system_instruction")
-        if resp.status_code == 200:
-            data = resp.json()
-            return True, _extract_text(data), 200
-        if resp.status_code == 404:
-            return False, f"HTTP 404 at {url}: {resp.text[:600]}", 404
-        if resp.status_code == 400 and ("system_instruction" in resp.text):
-            payload2 = json.loads(json.dumps(base_payload))
-            if sys_instr is not None:
-                payload2["systemInstruction"] = sys_instr
-            resp2 = _post(url, payload2, api_key, timeout, debug, "systemInstruction")
-            if resp2.status_code == 200:
-                data2 = resp2.json()
-                return True, _extract_text(data2), 200
-            return False, f"HTTP {resp2.status_code} at {url}: {resp2.text[:1000]}", resp2.status_code
-        return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+            payload[sys_key] = sys_instr
 
-    last_err = ""
-    for attempt in range(1, max(1, tries) + 1):
-        ok, res, code = try_one_endpoint(PRIMARY_VER)
-        if ok:
-            return True, res
-        last_err = res
-        if code == 404:
-            ok2, res2, _ = try_one_endpoint(FALLBACK_VER)
-            if ok2:
-                return True, res2
-            last_err = res2
-        time.sleep(min(2 * attempt, 6))
+        resp = _post(url, payload, api_key, timeout, debug, sys_key)
 
-    return False, last_err or "Unknown error"
+        # Non-200 → standard Google error envelope
+        if resp.status_code != 200:
+            try:
+                j = resp.json()
+            except Exception:
+                return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+            err = (j.get("error") or {})
+            code = err.get("code")
+            msg = err.get("message") or resp.text[:800]
+            status = err.get("status")
+            return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code
 
+        # 200 OK → still may be blocked / abnormal finish
+        data = resp.json()
+        block = _is_blocked_prompt(data)
+        if block:
+            return False, block, 200
+        fr_err = _finish_reason_error(data)
+        if fr_err:
+            return False, fr_err, 200
 
+        text = _extract_text(data)
+        if not text:
+            return False, "Empty text in successful response", 200
+        return True, text, 200
+
+    # v1beta w/ system_instruction, then camelCase, then v1 fallback
+    ok, res, code = try_one_endpoint(PRIMARY_VER, "system_instruction")
+    if ok:
+        return True, res
+
+    if code == 400 and ("system_instruction" in res or "systemInstruction" in res):
+        ok2, res2, code2 = try_one_endpoint(PRIMARY_VER, "systemInstruction")
+        if ok2:
+            return True, res2
+        res, code = res2, code2
+
+    if code == 404:
+        ok3, res3, _ = try_one_endpoint(FALLBACK_VER, "system_instruction")
+        if ok3:
+            return True, res3
+        return False, res3
+
+    return False, res
+
+# -----------------------------
+# Node
+# -----------------------------
 class PVL_Gemini_API_avatar_special:
     """
-    PVL Gemini API (Avatar Special) with batch splitting of the final prompt segment.
-
-    Expected 'prompt' input format:
-
-        <header part 1>
-        -----
-        <header part 2>
-        -----
-        <header part 3>
-        -----
-        <prompt>  (may contain "[*]" to split into prompt1, prompt2, ...)
-
-    Behavior:
-    - Find the LAST occurrence of the section delimiter (default "-----").
-    - Everything BEFORE that delimiter is the shared header (sent to every call).
-    - Everything AFTER that delimiter is the tail prompt.
-    - If batch > 1, split the TAIL prompt by prompt_split_delimiter (default "[*]")
-      and send a different tail piece to each parallel call.
-    - If there are fewer tail pieces than batch, reuse the last piece for the remaining calls.
-    - If append_variation_tag is True AND batch > 1, append an extra section line
-      and "Variation N" at the end of each per-call prompt.
+    PVL Gemini API (Avatar Special) with:
+    - Header/tail splitting by 'section_delimiter' (default '-----')
+    - Tail split by 'prompt_split_delimiter' (default '[*]') across batch
+    - Per-item retry with Gemini-aware error detection
     """
 
     @classmethod
@@ -207,12 +228,11 @@ class PVL_Gemini_API_avatar_special:
                 "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
                 "batch": ("INT", {"default": 1, "min": 1, "max": 32}),
-                # 'delimiter' here is used to JOIN returned results (unchanged from standard PVL node)
+                # used to JOIN returned results
                 "delimiter": ("STRING", {"default": "[*]", "multiline": False}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
-
-                # NEW: how we parse the input prompt
+                # prompt parsing
                 "section_delimiter": ("STRING", {"default": "-----", "multiline": False}),
                 "prompt_split_delimiter": ("STRING", {"default": "[*]", "multiline": False}),
             },
@@ -231,29 +251,20 @@ class PVL_Gemini_API_avatar_special:
     CATEGORY = "PVL/LLM"
 
     def _split_header_and_tail(self, prompt: str, section_delim: str, debug: bool) -> Tuple[str, str]:
-        """
-        Split the 'prompt' on the LAST occurrence of the section delimiter.
-        Returns (header, tail). If no delimiter found, header="", tail=prompt.
-        Preserves original whitespace around header, and strips leading/trailing
-        whitespace from tail.
-        """
         if not prompt:
             return "", ""
         idx = prompt.rfind(section_delim)
         if idx < 0:
             _log_debug(debug, "No section_delimiter found; sending entire prompt as tail.")
             return "", prompt.strip()
-        header = prompt[:idx].rstrip()  # keep as-is, but trim trailing space/newlines
+        header = prompt[:idx].rstrip()
         tail = prompt[idx + len(section_delim):].strip()
         return header, tail
 
     def _split_tail_parts(self, tail: str, split_delim: str) -> List[str]:
-        # Split by the split delimiter, trimming whitespace around parts.
         if not tail:
             return [""]
         parts = [p.strip() for p in re.split(re.escape(split_delim), tail)]
-        # Keep empty parts if user explicitly provided them (e.g., trailing delimiter);
-        # however, filter pure empty series at ends.
         if parts and parts[0] == "" and len(parts) > 1:
             parts = parts[1:]
         if parts and parts[-1] == "" and len(parts) > 1:
@@ -273,7 +284,7 @@ class PVL_Gemini_API_avatar_special:
             instructions: Optional[str] = "", prompt: Optional[str] = "",
             image: Any = None, api_key: str = "", seed: int = 0):
 
-        start_time = time.time()  # <-- Start timer
+        start_time = time.time()
 
         key = _get_api_key(api_key)
         if not key:
@@ -286,15 +297,14 @@ class PVL_Gemini_API_avatar_special:
         if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
             raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
 
-        # --- Build per-call prompts ---
+        # --- Build per-call prompts (header + per-index tail piece) ---
         header, tail = self._split_header_and_tail(prompt or "", section_delimiter, debug)
         if batch > 1:
             tail_parts = self._split_tail_parts(tail, prompt_split_delimiter)
         else:
-            tail_parts = [tail]  # do not split if batch == 1
+            tail_parts = [tail]
 
         def per_call_prompt(i: int) -> str:
-            # pick i-th tail part (1-based). Reuse last if out of range.
             idx = max(0, min(i - 1, len(tail_parts) - 1))
             chosen_tail = tail_parts[idx] if tail_parts else ""
             composed = self._compose_full_prompt(header, section_delimiter, chosen_tail)
@@ -302,34 +312,67 @@ class PVL_Gemini_API_avatar_special:
                 composed = f"{composed.rstrip()}\n{section_delimiter}\nVariation {i}"
             return composed
 
-        def single_call(i: int):
-            prompt_variant = per_call_prompt(i)
+        # --- Per-item retry loop across the batch ---
+        results: Dict[int, str] = {}
+        last_errors: Dict[int, str] = {}
+
+        pending = list(range(batch))  # 0-based indices that still need success
+        attempt = 0
+        max_workers = min(batch, 8)
+
+        while pending and attempt < tries:
+            attempt += 1
             if debug:
-                _log_debug(debug, f"[Call {i}] Final prompt to send:\n{prompt_variant}")
-            ok, result = _generate(
-                api_key=key, model=model, instructions=instructions or "",
-                prompt=prompt_variant or "", pil_img=pil_img, tries=tries,
-                timeout=timeout, temperature=temperature,
-                top_p=top_p, top_k=top_k, debug=debug
-            )
-            if not ok:
-                return f"[Error {i}] {result}"
-            return result.strip()
+                _log_debug(debug, f"Retry round {attempt}/{tries} for indices: {[p+1 for p in pending]}")
 
-        results: List[str] = []
-        with ThreadPoolExecutor(max_workers=min(batch, 8)) as ex:
-            futs = [ex.submit(single_call, i + 1) for i in range(batch)]
-            for fut in as_completed(futs):
-                results.append(fut.result())
+            def _call(idx: int) -> Tuple[int, bool, str]:
+                prompt_variant = per_call_prompt(idx + 1)
+                ok, out_or_err = _generate_once(
+                    api_key=key,
+                    model=model,
+                    instructions=instructions or "",
+                    prompt=prompt_variant or "",
+                    pil_img=pil_img,
+                    timeout=timeout,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    debug=debug,
+                )
+                return (idx, ok, out_or_err)
 
-        combined = f" {delimiter} ".join(results)
+            round_fails: List[int] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {ex.submit(_call, idx): idx for idx in pending}
+                for fut in as_completed(futs):
+                    idx, ok, payload = fut.result()
+                    if ok:
+                        results[idx] = payload.strip()
+                        if idx in last_errors:
+                            last_errors.pop(idx, None)
+                    else:
+                        last_errors[idx] = payload
+                        round_fails.append(idx)
+                        print(f"[PVL_GEMINI_SPECIAL] (batch item {idx+1}) API error: {payload}", flush=True)
 
-        # --- Time reporting ---
+            pending = round_fails
+
+            if pending and attempt < tries:
+                time.sleep(min(2 * attempt, 6))
+
+        # If any still pending → fail and stop the workflow
+        if pending:
+            first_idx = pending[0]
+            msg = last_errors.get(first_idx, "Unknown error")
+            failed_str = ", ".join(str(i + 1) for i in pending)
+            raise RuntimeError(f"Gemini API failed for batch item(s) {failed_str}: {msg}")
+
+        combined = f" {delimiter} ".join(results[i] for i in range(batch))
+
         elapsed = time.time() - start_time
-        print(f"[PVL_GEMINI_SPECIAL] Completed in {elapsed:.2f} seconds (batch={batch})")
+        print(f"[PVL_GEMINI_SPECIAL] Completed in {elapsed:.2f} seconds (batch={batch}, tries={tries})", flush=True)
 
         return (combined,)
-
 
 NODE_CLASS_MAPPINGS = {"PVL_Gemini_API_avatar_special": PVL_Gemini_API_avatar_special}
 NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)"}

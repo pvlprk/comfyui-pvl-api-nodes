@@ -1,6 +1,6 @@
 # pvl_gemini_api.py
 # PVL - Gemini API (Google Developer API)
-# Supports: batch parallel calls, delimiter output, optional "(variation N)" suffix toggle.
+# Batch-wise selective retries + Gemini error detection
 # Prints total execution time always, even when debug is off.
 
 import os, io, time, base64, json
@@ -26,6 +26,9 @@ HARDCODED_MODELS = [
     "gemini-2.0-flash",
 ]
 
+# -----------------------------
+# Utils
+# -----------------------------
 def _log_debug(debug: bool, *args):
     if debug:
         print("[PVL_GEMINI]", *args, flush=True)
@@ -81,6 +84,7 @@ def _build_contents(prompt: Optional[str], pil_img: Optional[Image.Image]) -> li
     return [{"role": "user", "parts": parts}]
 
 def _extract_text(resp_json: Dict[str, Any]) -> str:
+    """Best-effort extraction of the first candidate text."""
     cands = resp_json.get("candidates") or []
     if not cands:
         fb = resp_json.get("promptFeedback") or {}
@@ -89,6 +93,30 @@ def _extract_text(resp_json: Dict[str, Any]) -> str:
     parts = (cands[0] or {}).get("content", {}).get("parts", []) or []
     out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
     return out.strip()
+
+# -----------------------------
+# Error detection (aligned to Gemini docs)
+# - Non-200: standard Google error model {"error":{code,message,status}}
+# - 200 but blocked: promptFeedback.blockReason present
+# - 200 but candidate stopped abnormally: candidates[0].finishReason in {SAFETY, RECITATION, OTHER, BLOCKLIST, ...}
+# -----------------------------
+_GOOD_FINISH = {"STOP", "FINISH_REASON_UNSPECIFIED", None}
+
+def _is_blocked_prompt(resp_json: Dict[str, Any]) -> Optional[str]:
+    fb = resp_json.get("promptFeedback") or {}
+    br = fb.get("blockReason") or fb.get("block_reason")
+    if br:
+        return f"Prompt blocked (blockReason={br})"
+    return None
+
+def _finish_reason_error(resp_json: Dict[str, Any]) -> Optional[str]:
+    cands = resp_json.get("candidates") or []
+    if not cands:
+        return "No candidates in response"
+    fr = (cands[0] or {}).get("finishReason") or (cands[0] or {}).get("finish_reason")
+    if fr not in _GOOD_FINISH:
+        return f"Content generation stopped (finishReason={fr})"
+    return None
 
 def _gen_url(model: str, api_version: str) -> str:
     model_path = model if model.startswith("models/") else f"models/{model}"
@@ -110,9 +138,13 @@ def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: 
         _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
     return resp
 
-def _generate(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
-              pil_img: Optional[Image.Image], tries: int, timeout: int, temperature: float,
-              top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
+                   pil_img: Optional[Image.Image], timeout: int, temperature: float,
+                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+    """
+    Single request (no looping). Returns (ok, text_or_error).
+    Detects Gemini-specific block/error states inside HTTP 200.
+    """
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
@@ -124,46 +156,68 @@ def _generate(api_key: str, model: str, instructions: Optional[str], prompt: Opt
 
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
-    def try_one_endpoint(api_ver: str) -> Tuple[bool, str, Optional[int]]:
+    def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int]]:
         url = _gen_url(model, api_ver)
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
-            payload["system_instruction"] = sys_instr
-        resp = _post(url, payload, api_key, timeout, debug, "system_instruction")
-        if resp.status_code == 200:
-            data = resp.json()
-            return True, _extract_text(data), 200
-        if resp.status_code == 404:
-            return False, f"HTTP 404 at {url}: {resp.text[:600]}", 404
-        if resp.status_code == 400 and ("system_instruction" in resp.text):
-            payload2 = json.loads(json.dumps(base_payload))
-            if sys_instr is not None:
-                payload2["systemInstruction"] = sys_instr
-            resp2 = _post(url, payload2, api_key, timeout, debug, "systemInstruction")
-            if resp2.status_code == 200:
-                data2 = resp2.json()
-                return True, _extract_text(data2), 200
-            return False, f"HTTP {resp2.status_code} at {url}: {resp2.text[:1000]}", resp2.status_code
-        return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+            payload[sys_key] = sys_instr
 
-    last_err = ""
-    for attempt in range(1, max(1, tries) + 1):
-        ok, res, code = try_one_endpoint(PRIMARY_VER)
-        if ok:
-            return True, res
-        last_err = res
-        if code == 404:
-            ok2, res2, _ = try_one_endpoint(FALLBACK_VER)
-            if ok2:
-                return True, res2
-            last_err = res2
-        time.sleep(min(2 * attempt, 6))
+        resp = _post(url, payload, api_key, timeout, debug, sys_key)
+        # Non-200 => standard Google error envelope ({"error": {...}})
+        if resp.status_code != 200:
+            try:
+                j = resp.json()
+            except Exception:
+                return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+            err = (j.get("error") or {})
+            code = err.get("code")
+            msg = err.get("message") or resp.text[:800]
+            status = err.get("status")
+            return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code
 
-    return False, last_err or "Unknown error"
+        # 200 OK => still might be blocked or abnormal finishReason
+        data = resp.json()
+        block = _is_blocked_prompt(data)
+        if block:
+            return False, block, 200
+        fr_err = _finish_reason_error(data)
+        if fr_err:
+            return False, fr_err, 200
 
+        text = _extract_text(data)
+        if not text:
+            return False, "Empty text in successful response", 200
+        return True, text, 200
 
+    # First, try v1beta with "system_instruction", then fallback to "systemInstruction" if needed,
+    # then try v1 similarly as a compatibility fallback.
+    ok, res, code = try_one_endpoint(PRIMARY_VER, "system_instruction")
+    if ok:
+        return True, res
+
+    # Some deployments accept camelCase
+    if code == 400 and ("system_instruction" in res or "systemInstruction" in res):
+        ok2, res2, code2 = try_one_endpoint(PRIMARY_VER, "systemInstruction")
+        if ok2:
+            return True, res2
+        # continue to fallback after this path; record last error
+        res, code = res2, code2
+
+    # 404s and certain model/version mismatches: try fallback API version
+    if code == 404:
+        ok3, res3, _ = try_one_endpoint(FALLBACK_VER, "system_instruction")
+        if ok3:
+            return True, res3
+        return False, res3
+
+    return False, res
+
+# -----------------------------
+# Node
+# -----------------------------
 class PVL_Gemini_API:
-    """PVL Gemini API with batch, delimiter, '(variation N)' suffix toggle, and time logging."""
+    """PVL Gemini API with batch, delimiter, '(variation N)' suffix toggle,
+    per-item retry with Gemini-aware error detection, and time logging."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -177,7 +231,7 @@ class PVL_Gemini_API:
                 "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
                 "batch": ("INT", {"default": 1, "min": 1, "max": 10}),
-                "delimiter": ("STRING", {"default": "[*]", "multiline": False}),
+                "delimiter": ("STRING", {"default": "[++]", "multiline": False}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
             },
@@ -199,10 +253,9 @@ class PVL_Gemini_API:
             top_p: float, top_k: int, batch: int, delimiter: str,
             append_variation_tag: bool, debug: bool,
             instructions: Optional[str] = "", prompt: Optional[str] = "",
-            image: Any = None, api_key: str = "",
-                seed: int = 0):
+            image: Any = None, api_key: str = "", seed: int = 0):
 
-        start_time = time.time()  # <-- Start timer
+        start_time = time.time()
 
         key = _get_api_key(api_key)
         if not key:
@@ -215,33 +268,79 @@ class PVL_Gemini_API:
         if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
             raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
 
-        def single_call(i: int):
-            prompt_variant = (
-                f"{prompt.rstrip()}\n-----\nVariation {i}"
-                if append_variation_tag and batch > 1 and prompt.strip()
-                else prompt
-            )
-            ok, result = _generate(
-                api_key=key, model=model, instructions=instructions or "",
-                prompt=prompt_variant or "", pil_img=pil_img, tries=tries,
-                timeout=timeout, temperature=temperature,
-                top_p=top_p, top_k=top_k, debug=debug
-            )
-            if not ok:
-                return f"[Error {i}] {result}"
-            return result.strip()
+        # Prepare per-index prompt variants
+        def make_variant(i: int) -> str:
+            if append_variation_tag and batch > 1 and (prompt or "").strip():
+                return f"{str(prompt).rstrip()}\n-----\nVariation {i}"
+            return str(prompt or "")
 
-        results: List[str] = []
-        with ThreadPoolExecutor(max_workers=min(batch, 8)) as ex:
-            futs = [ex.submit(single_call, i + 1) for i in range(batch)]
-            for fut in as_completed(futs):
-                results.append(fut.result())
+        # Results and state
+        results: Dict[int, str] = {}          # successful outputs
+        last_errors: Dict[int, str] = {}      # last error message per index
 
-        combined = f" {delimiter} ".join(results)
+        pending = list(range(batch))          # indices that still need a good answer
+        attempt = 0
+        max_workers = min(batch, 8)
 
-        # --- Time reporting ---
+        while pending and attempt < tries:
+            attempt += 1
+            if debug:
+                _log_debug(debug, f"Retry round {attempt}/{tries} for indices: {[p+1 for p in pending]}")
+
+            # Build call set only for pending indices
+            def _call(idx: int) -> Tuple[int, bool, str]:
+                # idx is 0-based; for logs show 1-based
+                ptxt = make_variant(idx + 1)
+                ok, out_or_err = _generate_once(
+                    api_key=key,
+                    model=model,
+                    instructions=instructions or "",
+                    prompt=ptxt,
+                    pil_img=pil_img,
+                    timeout=timeout,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    debug=debug,
+                )
+                return (idx, ok, out_or_err)
+
+            round_fails: List[int] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {ex.submit(_call, idx): idx for idx in pending}
+                for fut in as_completed(futs):
+                    idx, ok, payload = fut.result()
+                    if ok:
+                        results[idx] = payload.strip()
+                        # clear any old error
+                        if idx in last_errors:
+                            last_errors.pop(idx, None)
+                    else:
+                        last_errors[idx] = payload
+                        round_fails.append(idx)
+                        print(f"[PVL_GEMINI] (batch item {idx+1}) API error: {payload}", flush=True)
+
+            # Prepare next round with only those that failed in this round
+            pending = round_fails
+
+            # Small backoff between rounds (linear)
+            if pending and attempt < tries:
+                time.sleep(min(2 * attempt, 6))
+
+        # After all attempts, if any pending remain => fail hard with the last API error
+        if pending:
+            # Choose a representative error: prefer the first pending index's last error
+            first_idx = pending[0]
+            msg = last_errors.get(first_idx, "Unknown error")
+            # Aggregate list for easier debugging
+            failed_str = ", ".join(str(i + 1) for i in pending)
+            raise RuntimeError(f"Gemini API failed for batch item(s) {failed_str}: {msg}")
+
+        # Combine results in index order with delimiter
+        combined = " {} ".format(delimiter).join(results[i] for i in range(batch))
+
         elapsed = time.time() - start_time
-        print(f"[PVL_GEMINI] Completed in {elapsed:.2f} seconds (batch={batch})")
+        print(f"[PVL_GEMINI] Completed in {elapsed:.2f} seconds (batch={batch}, tries={tries})", flush=True)
 
         return (combined,)
 
