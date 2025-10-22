@@ -2,6 +2,7 @@
 # PVL - Gemini API (Avatar Special)
 # Shared header (sections split by "-----") + split the FINAL prompt by "[*]" across parallel calls.
 # Adds Gemini-aware error detection and per-item retry: only failed items are retried each round.
+# Updated: retries on timeout + linear backoff (1s,2s,3s,4s…)
 
 import os, io, time, base64, json, re
 from typing import Any, Dict, Optional, Tuple, List
@@ -118,29 +119,42 @@ def _gen_url(model: str, api_version: str) -> str:
     model_path = model if model.startswith("models/") else f"models/{model}"
     return f"{GEMINI_BASE}/{api_version}/{model_path}:generateContent"
 
+# --- modified: timeout now treated as retryable (status 599) ---
 def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: bool, note: str) -> requests.Response:
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    if debug:
-        san = json.loads(json.dumps(payload))
-        for msg in san.get("contents", []):
-            for part in msg.get("parts", []):
-                if "inline_data" in part and "data" in part["inline_data"]:
-                    part["inline_data"]["data"] = f"<{len(part['inline_data']['data'])} base64 bytes>"
-        _log_debug(debug, f"POST {url} ({note})")
-        _log_debug(debug, "Request JSON:", json.dumps(san, ensure_ascii=False)[:10000])
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    if debug:
-        _log_debug(debug, f"HTTP {resp.status_code}")
-        _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
-    return resp
+    try:
+        if debug:
+            san = json.loads(json.dumps(payload))
+            for msg in san.get("contents", []):
+                for part in msg.get("parts", []):
+                    if "inline_data" in part and "data" in part["inline_data"]:
+                        part["inline_data"]["data"] = f"<{len(part['inline_data']['data'])} base64 bytes>"
+            _log_debug(debug, f"POST {url} ({note})")
+            _log_debug(debug, "Request JSON:", json.dumps(san, ensure_ascii=False)[:10000])
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if debug:
+            _log_debug(debug, f"HTTP {resp.status_code}")
+            _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
+        return resp
+    except requests.exceptions.Timeout:
+        if debug:
+            print(f"[PVL_GEMINI_SPECIAL] Request timeout after {timeout}s")
+        class TimeoutResponse:
+            status_code = 599
+            text = "Client timeout"
+            def json(self): return {"error": {"message": "Client timeout", "status": "TIMEOUT"}}
+        return TimeoutResponse()
+    except requests.exceptions.RequestException as e:
+        if debug:
+            print(f"[PVL_GEMINI_SPECIAL] Request exception: {e}")
+        raise
 
+# -----------------------------
+# Core request (single)
+# -----------------------------
 def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
                    pil_img: Optional[Image.Image], timeout: int, temperature: float,
                    top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
-    """
-    One request attempt, Gemini-aware error detection.
-    Returns (ok, text_or_error).
-    """
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
@@ -149,7 +163,6 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
         gen_cfg["topP"] = float(top_p)
     if isinstance(top_k, int) and top_k > 0:
         gen_cfg["topK"] = int(top_k)
-
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
     def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int]]:
@@ -157,10 +170,11 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
             payload[sys_key] = sys_instr
-
         resp = _post(url, payload, api_key, timeout, debug, sys_key)
+        # timeout or retryable-like 599
+        if resp.status_code == 599:
+            return False, "Client timeout", 599
 
-        # Non-200 → standard Google error envelope
         if resp.status_code != 200:
             try:
                 j = resp.json()
@@ -172,7 +186,6 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
             status = err.get("status")
             return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code
 
-        # 200 OK → still may be blocked / abnormal finish
         data = resp.json()
         block = _is_blocked_prompt(data)
         if block:
@@ -186,23 +199,19 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
             return False, "Empty text in successful response", 200
         return True, text, 200
 
-    # v1beta w/ system_instruction, then camelCase, then v1 fallback
     ok, res, code = try_one_endpoint(PRIMARY_VER, "system_instruction")
     if ok:
         return True, res
-
     if code == 400 and ("system_instruction" in res or "systemInstruction" in res):
         ok2, res2, code2 = try_one_endpoint(PRIMARY_VER, "systemInstruction")
         if ok2:
             return True, res2
         res, code = res2, code2
-
     if code == 404:
         ok3, res3, _ = try_one_endpoint(FALLBACK_VER, "system_instruction")
         if ok3:
             return True, res3
         return False, res3
-
     return False, res
 
 # -----------------------------
@@ -210,10 +219,8 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
 # -----------------------------
 class PVL_Gemini_API_avatar_special:
     """
-    PVL Gemini API (Avatar Special) with:
-    - Header/tail splitting by 'section_delimiter' (default '-----')
-    - Tail split by 'prompt_split_delimiter' (default '[*]') across batch
-    - Per-item retry with Gemini-aware error detection
+    PVL Gemini API (Avatar Special)
+    Adds retry on timeout and linear backoff.
     """
 
     @classmethod
@@ -228,11 +235,9 @@ class PVL_Gemini_API_avatar_special:
                 "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
                 "batch": ("INT", {"default": 1, "min": 1, "max": 32}),
-                # used to JOIN returned results
                 "delimiter": ("STRING", {"default": "[*]", "multiline": False}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
-                # prompt parsing
                 "section_delimiter": ("STRING", {"default": "-----", "multiline": False}),
                 "prompt_split_delimiter": ("STRING", {"default": "[*]", "multiline": False}),
             },
@@ -297,12 +302,8 @@ class PVL_Gemini_API_avatar_special:
         if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
             raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
 
-        # --- Build per-call prompts (header + per-index tail piece) ---
         header, tail = self._split_header_and_tail(prompt or "", section_delimiter, debug)
-        if batch > 1:
-            tail_parts = self._split_tail_parts(tail, prompt_split_delimiter)
-        else:
-            tail_parts = [tail]
+        tail_parts = self._split_tail_parts(tail, prompt_split_delimiter) if batch > 1 else [tail]
 
         def per_call_prompt(i: int) -> str:
             idx = max(0, min(i - 1, len(tail_parts) - 1))
@@ -312,13 +313,8 @@ class PVL_Gemini_API_avatar_special:
                 composed = f"{composed.rstrip()}\n{section_delimiter}\nVariation {i}"
             return composed
 
-        # --- Per-item retry loop across the batch ---
-        results: Dict[int, str] = {}
-        last_errors: Dict[int, str] = {}
-
-        pending = list(range(batch))  # 0-based indices that still need success
-        attempt = 0
-        max_workers = min(batch, 8)
+        results, last_errors, pending = {}, {}, list(range(batch))
+        attempt, max_workers = 0, min(batch, 8)
 
         while pending and attempt < tries:
             attempt += 1
@@ -328,39 +324,35 @@ class PVL_Gemini_API_avatar_special:
             def _call(idx: int) -> Tuple[int, bool, str]:
                 prompt_variant = per_call_prompt(idx + 1)
                 ok, out_or_err = _generate_once(
-                    api_key=key,
-                    model=model,
-                    instructions=instructions or "",
-                    prompt=prompt_variant or "",
-                    pil_img=pil_img,
-                    timeout=timeout,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    debug=debug,
-                )
+                    api_key=key, model=model,
+                    instructions=instructions or "", prompt=prompt_variant or "",
+                    pil_img=pil_img, timeout=timeout,
+                    temperature=temperature, top_p=top_p, top_k=top_k, debug=debug)
                 return (idx, ok, out_or_err)
 
-            round_fails: List[int] = []
+            next_round: List[int] = []
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futs = {ex.submit(_call, idx): idx for idx in pending}
                 for fut in as_completed(futs):
                     idx, ok, payload = fut.result()
                     if ok:
                         results[idx] = payload.strip()
-                        if idx in last_errors:
-                            last_errors.pop(idx, None)
+                        last_errors.pop(idx, None)
                     else:
                         last_errors[idx] = payload
-                        round_fails.append(idx)
-                        print(f"[PVL_GEMINI_SPECIAL] (batch item {idx+1}) API error: {payload}", flush=True)
+                        # mark retryable if timeout
+                        if "timeout" in payload.lower() or "429" in payload or "503" in payload:
+                            next_round.append(idx)
+                        else:
+                            print(f"[PVL_GEMINI_SPECIAL] (batch item {idx+1}) API error: {payload}", flush=True)
 
-            pending = round_fails
-
+            pending = next_round
             if pending and attempt < tries:
-                time.sleep(min(2 * attempt, 6))
+                delay = attempt  # linear backoff
+                if debug:
+                    print(f"[PVL_GEMINI_SPECIAL] Waiting {delay}s before retry...")
+                time.sleep(delay)
 
-        # If any still pending → fail and stop the workflow
         if pending:
             first_idx = pending[0]
             msg = last_errors.get(first_idx, "Unknown error")
@@ -368,11 +360,10 @@ class PVL_Gemini_API_avatar_special:
             raise RuntimeError(f"Gemini API failed for batch item(s) {failed_str}: {msg}")
 
         combined = f" {delimiter} ".join(results[i] for i in range(batch))
-
         elapsed = time.time() - start_time
-        print(f"[PVL_GEMINI_SPECIAL] Completed in {elapsed:.2f} seconds (batch={batch}, tries={tries})", flush=True)
-
+        print(f"[PVL_GEMINI_SPECIAL] Completed in {elapsed:.2f}s (batch={batch}, tries={tries})", flush=True)
         return (combined,)
+
 
 NODE_CLASS_MAPPINGS = {"PVL_Gemini_API_avatar_special": PVL_Gemini_API_avatar_special}
 NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)"}
