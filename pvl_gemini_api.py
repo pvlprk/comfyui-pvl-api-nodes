@@ -1,7 +1,6 @@
 # pvl_gemini_api.py
 # PVL - Gemini API (Google Developer API)
-# Batch-wise selective retries + Gemini error detection
-# Added: timeout handling as retryable + linear backoff (1-2-3-4...)
+# Batch-wise selective retries + Gemini error detection + Linear timeout backoff
 
 import os, io, time, base64, json, random
 from typing import Any, Dict, Optional, Tuple, List
@@ -118,33 +117,30 @@ def _gen_url(model: str, api_version: str) -> str:
     model_path = model if model.startswith("models/") else f"models/{model}"
     return f"{GEMINI_BASE}/{api_version}/{model_path}:generateContent"
 
-# --- modified: now treats timeout as retryable ---
-def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: bool, note: str):
+def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: bool, note: str) -> requests.Response:
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    if debug:
+        san = json.loads(json.dumps(payload))
+        for msg in san.get("contents", []):
+            for part in msg.get("parts", []):
+                if "inline_data" in part and "data" in part["inline_data"]:
+                    part["inline_data"]["data"] = f"<{len(part['inline_data']['data'])} base64 bytes>"
+        _log_debug(debug, f"POST {url} ({note})")
+        _log_debug(debug, "Request JSON:", json.dumps(san, ensure_ascii=False)[:10000])
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if debug:
-            _log_debug(debug, f"HTTP {resp.status_code}")
-        return resp
     except requests.exceptions.Timeout:
-        if debug:
-            print(f"[PVL_GEMINI] Request timeout after {timeout}s")
-        class TimeoutResponse:
-            status_code = 599
-            text = "Client timeout"
-            def json(self): return {"error": {"message": "Client timeout", "status": "TIMEOUT"}}
-        return TimeoutResponse()
-    except requests.exceptions.RequestException as e:
-        if debug:
-            print(f"[PVL_GEMINI] Request exception: {e}")
-        raise
+        raise TimeoutError("Request timed out")
+    if debug:
+        _log_debug(debug, f"HTTP {resp.status_code}")
+        _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
+    return resp
 
-# ----- retry classification -----
 _RETRY_HTTP_CODES = {408, 429, 500, 502, 503, 504}
 _NONRETRY_HTTP_CODES = {400, 401, 403, 404}
 
 def _is_retryable_http(code: Optional[int], status_str: Optional[str]) -> bool:
-    if code in _RETRY_HTTP_CODES or code == 599:  # include timeout sentinel
+    if code in _RETRY_HTTP_CODES:
         return True
     if status_str:
         s = str(status_str).upper()
@@ -156,12 +152,11 @@ def _is_nonretryable_http(code: Optional[int]) -> bool:
     return code in _NONRETRY_HTTP_CODES
 
 # -----------------------------
-# Core generation
+# Generate Once
 # -----------------------------
 def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
                    pil_img: Optional[Image.Image], timeout: int, temperature: float,
                    top_p: float, top_k: int, debug: bool) -> Tuple[bool, str, int, bool]:
-
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
     gen_cfg: Dict[str, Any] = {"temperature": float(temperature)}
@@ -171,27 +166,30 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
         gen_cfg["topK"] = int(top_k)
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
-    def try_one_endpoint(api_ver: str, sys_key: str):
+    def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int], bool]:
         url = _gen_url(model, api_ver)
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
             payload[sys_key] = sys_instr
-        resp = _post(url, payload, api_key, timeout, debug, sys_key)
+        try:
+            resp = _post(url, payload, api_key, timeout, debug, sys_key)
+        except TimeoutError:
+            return False, "Timeout reached", 408, True
 
         if resp.status_code != 200:
             try:
                 j = resp.json()
             except Exception:
                 retryable = _is_retryable_http(resp.status_code, None)
-                return False, f"HTTP {resp.status_code}: {resp.text[:500]}", resp.status_code, retryable
-            err = j.get("error") or {}
+                return False, f"HTTP {resp.status_code}: {resp.text[:1000]}", resp.status_code, retryable
+            err = j.get("error", {})
             code = err.get("code")
-            msg = err.get("message") or resp.text[:400]
+            msg = err.get("message") or resp.text[:800]
             status = err.get("status")
             if _is_nonretryable_http(code):
-                return False, f"HTTP {resp.status_code} ({status or code}): {msg}", resp.status_code, False
+                return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code, False
             retryable = _is_retryable_http(code, status)
-            return False, f"HTTP {resp.status_code} ({status or code}): {msg}", resp.status_code, retryable
+            return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code, retryable
 
         data = resp.json()
         block = _is_blocked_prompt(data)
@@ -200,9 +198,10 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
         fr_err = _finish_reason_error(data)
         if fr_err:
             return False, fr_err, 200, False
+
         text = _extract_text(data)
         if not text:
-            return False, "Empty text in response", 200, False
+            return False, "Empty text in successful response", 200, False
         return True, text, 200, False
 
     ok, res, code, retryable = try_one_endpoint(PRIMARY_VER, "system_instruction")
@@ -224,8 +223,6 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
 # Node
 # -----------------------------
 class PVL_Gemini_API:
-    """PVL Gemini API with batch retry and linear backoff."""
-
     @classmethod
     def INPUT_TYPES(cls):
         default_model = "gemini-2.5-flash"
@@ -234,10 +231,10 @@ class PVL_Gemini_API:
                 "model": (HARDCODED_MODELS, {"default": default_model}),
                 "tries": ("INT", {"default": 2, "min": 1, "max": 10}),
                 "timeout": ("INT", {"default": 45, "min": 1, "max": 600}),
-                "temperature": ("FLOAT", {"default": 1, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
-                "batch": ("INT", {"default": 1, "min": 1, "max": 10}),
+                "temperature": ("FLOAT", {"default": 1}),
+                "top_p": ("FLOAT", {"default": 0.95}),
+                "top_k": ("INT", {"default": 65}),
+                "batch": ("INT", {"default": 1}),
                 "delimiter": ("STRING", {"default": "[++]"}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
@@ -247,7 +244,7 @@ class PVL_Gemini_API:
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "image": ("IMAGE",),
                 "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {"default": 0}),
             }
         }
 
@@ -256,70 +253,79 @@ class PVL_Gemini_API:
     FUNCTION = "run"
     CATEGORY = "PVL/LLM"
 
-    def run(self, model, tries, timeout, temperature, top_p, top_k, batch,
-            delimiter, append_variation_tag, debug,
+    def run(self, model, tries, timeout, temperature,
+            top_p, top_k, batch, delimiter,
+            append_variation_tag, debug,
             instructions="", prompt="", image=None, api_key="", seed=0):
 
         start_time = time.time()
         key = _get_api_key(api_key)
         if not key:
             raise RuntimeError("Missing API key.")
-
         pil_img = _tensor_to_pil_first(image) if image is not None else None
-        if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
-            raise RuntimeError("Nothing to send: provide instructions, prompt, or image.")
 
-        def make_variant(i: int) -> str:
+        if not ((instructions and instructions.strip()) or (prompt and str(prompt).strip()) or pil_img is not None):
+            raise RuntimeError("Nothing to send: provide at least one of instructions, prompt, or image.")
+
+        def make_variant(i): 
             if append_variation_tag and batch > 1 and (prompt or "").strip():
                 return f"{str(prompt).rstrip()}\n-----\nVariation {i}"
             return str(prompt or "")
 
         results, last_errors, hard_fail = {}, {}, []
         pending = list(range(batch))
-        attempt = 0
+        attempt, max_workers = 0, min(batch, 8)
 
         while pending and attempt < tries:
             attempt += 1
             if debug:
-                _log_debug(debug, f"Round {attempt}/{tries}, retry indices: {[p+1 for p in pending]}")
-
-            def _call(idx: int):
-                ptxt = make_variant(idx + 1)
-                return (idx, *_generate_once(key, model, instructions or "", ptxt,
-                                             pil_img, timeout, temperature, top_p, top_k, debug))
-
+                _log_debug(debug, f"Attempt {attempt}/{tries} pending {pending}")
             next_round = []
-            with ThreadPoolExecutor(max_workers=min(batch, 8)) as ex:
+
+            def _call(idx):
+                ptxt = make_variant(idx + 1)
+                ok, out_or_err, code, retryable = _generate_once(
+                    api_key=key, model=model, instructions=instructions or "",
+                    prompt=ptxt, pil_img=pil_img, timeout=timeout,
+                    temperature=temperature, top_p=top_p, top_k=top_k, debug=debug
+                )
+                return (idx, ok, out_or_err, retryable)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futs = {ex.submit(_call, idx): idx for idx in pending}
                 for fut in as_completed(futs):
                     idx, ok, payload, retryable = fut.result()
                     if ok:
                         results[idx] = payload.strip()
+                        last_errors.pop(idx, None)
                     else:
                         last_errors[idx] = payload
                         if retryable:
                             next_round.append(idx)
                         else:
                             hard_fail.append(idx)
-                        print(f"[PVL_GEMINI] (item {idx+1}) error: {payload}", flush=True)
+                        print(f"[PVL_GEMINI] (batch {idx+1}) API error: {payload}", flush=True)
 
             pending = next_round
+
+            # Linear backoff wait between retries
             if pending and attempt < tries:
-                delay = attempt  # linear backoff
+                wait_time = attempt  # 1s, 2s, 3s, ...
                 if debug:
-                    print(f"[PVL_GEMINI] Waiting {delay}s before next retry...")
-                time.sleep(delay)
+                    _log_debug(debug, f"Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
 
         failed = sorted(set(pending + hard_fail))
         if failed:
-            msg = last_errors.get(failed[0], "Unknown error")
-            raise RuntimeError(f"Gemini API failed for item(s) {', '.join(str(i+1) for i in failed)}: {msg}")
+            first_idx = failed[0]
+            msg = last_errors.get(first_idx, "Unknown error")
+            failed_str = ", ".join(str(i + 1) for i in failed)
+            raise RuntimeError(f"Gemini API failed for batch item(s) {failed_str}: {msg}")
 
         combined = f" {delimiter} ".join(results[i] for i in range(batch))
         elapsed = time.time() - start_time
         print(f"[PVL_GEMINI] Completed in {elapsed:.2f}s (batch={batch}, tries={tries})", flush=True)
         return (combined,)
-
 
 NODE_CLASS_MAPPINGS = {"PVL_Gemini_API": PVL_Gemini_API}
 NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API": "PVL - Gemini Api"}
