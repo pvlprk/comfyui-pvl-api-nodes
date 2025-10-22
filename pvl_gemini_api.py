@@ -238,13 +238,14 @@ class PVL_Gemini_API:
                 "delimiter": ("STRING", {"default": "[++]"}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
-            },
-            "optional": {
                 "instructions": ("STRING", {"multiline": True, "default": ""}),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "seed": ("INT", {"default": 0}),
+            },
+            "optional": {
+
                 "image": ("IMAGE",),
                 "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": 0}),
             }
         }
 

@@ -240,13 +240,13 @@ class PVL_Gemini_API_avatar_special:
                 "debug": ("BOOLEAN", {"default": False}),
                 "section_delimiter": ("STRING", {"default": "-----", "multiline": False}),
                 "prompt_split_delimiter": ("STRING", {"default": "[*]", "multiline": False}),
-            },
-            "optional": {
                 "instructions": ("STRING", {"multiline": True, "default": ""}),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
                 "image": ("IMAGE",),
                 "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             }
         }
 
