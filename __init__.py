@@ -50,6 +50,7 @@ from .pvl_string_to_number import PVL_StringToNumber
 from .pvl_math import PVL_Math
 from .pvl_comfydeploy_lora_prep import PVL_ComfyDeploy_LoraPrep
 from .pvl_comfydeploy_universal import PVL_ComfyDeploy_Universal
+from .pvl_compare import PVL_Compare
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -104,8 +105,8 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Math": PVL_Math,
     "PVL_ComfyDeploy_LoraPrep": PVL_ComfyDeploy_LoraPrep,
     "PVL_ComfyDeploy_Universal": PVL_ComfyDeploy_Universal,
+    "PVL Compare": PVL_Compare,
 }
-
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL Call OpenAI Assistant": "PVL Call OpenAI Assistant",
@@ -159,4 +160,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Math": "PVL — Math",
     "PVL_ComfyDeploy_LoraPrep": "PVL - ComfyDeploy_LoraPrep",
     "PVL_ComfyDeploy_Universal": "PVL - PVL_ComfyDeploy_Universal",
+    "PVL Compare": "PVL Compare",
 }

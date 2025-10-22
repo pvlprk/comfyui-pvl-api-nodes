@@ -9,8 +9,9 @@
 #  - Retry Google on 408/429/5xx (quota/overload/transient)
 #  - If Google safety block (promptFeedback.blockReason or finishReason=SAFETY) -> do NOT retry; route to FAL
 #  - Remaining failures -> FAL (only once)
-#  - If FAL returns safety/policy error for those -> raise (halt workflow) with the API error
-#  - If some succeed overall but some still fail (non-safety) -> print errors and return only successes
+#  - IMPORTANT CHANGE: If FAL reports safety/policy errors but there are ANY successes (Google or FAL),
+#    DO NOT halt — return only the successful generations and log failed indices.
+#    If NO items succeeded overall and FAL reports safety/policy on any item → halt and raise that safety error.
 #
 # Requires:
 #   pip install google-genai requests pillow numpy torch
@@ -172,7 +173,7 @@ def _classify_google_error(msg: str) -> T.Tuple[bool, bool]:
     # Safety signals
     if "blockreason" in s or "prompt blocked" in s:
         return (False, True)
-    if "finishreason=safety" in s or "finish_reason=safety" in s or "safety" in s and "finish" in s:
+    if "finishreason=safety" in s or "finish_reason=safety" in s or ("safety" in s and "finish" in s):
         return (False, True)
     if "safety" in s and ("blocked" in s or "policy" in s):
         return (False, True)
@@ -550,7 +551,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
         def worker(idx: int, ptxt: str):
             try:
                 parts = self._build_parts(ptxt, images, input_mime)
-                g_imgs, g_texts, resp = self._single_google_call(client, model, parts, cfg, request_id, debug)
+                g_imgs, g_texts, _resp = self._single_google_call(client, model, parts, cfg, request_id, debug)
                 if g_imgs:
                     success_map[idx] = g_imgs[0]
                     if g_texts:
@@ -683,15 +684,27 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 all_indices, call_prompts, fal_key, fal_route_img2img, images, input_mime,
                 timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
             )
+            # Only halt if NO successes and there is FAL safety/policy
             if not fal_succ:
+                fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                if fal_safety:
+                    i = fal_safety[0]
+                    raise RuntimeError(fal_errs[i]["msg"])
                 any_err = next((v["msg"] for v in fal_errs.values()), "FAL failed with unknown error")
                 raise RuntimeError(any_err)
+
+            # Partial/full success on FAL → return successes only
             imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
             images_tensor = stack_images_same_size(imgs_out, debug_log)
             text_out = ""
             if want_text:
                 text_out = "\n".join(fal_texts[i] for i in sorted(fal_texts.keys()) if fal_texts.get(i))
-            print(f"[PVL NANO MANDATORY INFO] FAL force mode: {len(fal_succ)}/{N} succeeded; returning successes only.")
+            if len(fal_succ) < N:
+                failures = sorted(set(all_indices) - set(fal_succ.keys()))
+                for i in failures:
+                    msg = fal_errs.get(i, {}).get("msg", "Unknown FAL error")
+                    print(f"[PVL NANO MANDATORY ERROR] Item {i+1} failed after FAL: {msg}")
+                print(f"[PVL NANO MANDATORY WARNING] Returning only {len(fal_succ)}/{N} successful results (FAL).")
             print(f"[PVL NANO MANDATORY INFO] Completed in {time.time()-start_time:.2f}s")
             return text_out, images_tensor
 
@@ -705,14 +718,26 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                     all_indices, call_prompts, fal_key, fal_route_img2img, images, input_mime,
                     timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
                 )
+                # Only halt if NO successes and there is FAL safety/policy
                 if not fal_succ:
+                    fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                    if fal_safety:
+                        i = fal_safety[0]
+                        raise RuntimeError(fal_errs[i]["msg"])
                     any_err = next((v["msg"] for v in fal_errs.values()), "FAL failed with unknown error")
                     raise RuntimeError(any_err)
+
                 imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
                 images_tensor = stack_images_same_size(imgs_out, debug_log)
                 text_out = ""
                 if want_text:
                     text_out = "\n".join(fal_texts[i] for i in sorted(fal_texts.keys()) if fal_texts.get(i))
+                if len(fal_succ) < N:
+                    failures = sorted(set(all_indices) - set(fal_succ.keys()))
+                    for i in failures:
+                        msg = fal_errs.get(i, {}).get("msg", "Unknown FAL error")
+                        print(f"[PVL NANO MANDATORY ERROR] Item {i+1} failed after FAL: {msg}")
+                    print(f"[PVL NANO MANDATORY WARNING] Returning only {len(fal_succ)}/{N} successful results (FAL).")
                 print(f"[PVL NANO MANDATORY INFO] Google unavailable. FAL successes: {len(fal_succ)}/{N}. Completed in {time.time()-start_time:.2f}s")
                 return text_out, images_tensor
             raise RuntimeError("Gemini API key missing. Pass api_key or set GEMINI_API_KEY.")
@@ -738,7 +763,6 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
 
         # If zero succeeded on Google in round 1
         if len(succeeded) == 0:
-            # All failed: either safety, or non-retryable, or retryable
             if not use_fal_fallback:
                 any_err = next((v["msg"] for v in g_errs1.values()), "Gemini failed with unknown error")
                 raise RuntimeError(any_err)
@@ -752,21 +776,21 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 all_indices, call_prompts, fal_key, fal_route_img2img, images, input_mime,
                 timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
             )
-            # Safety on FAL for ANY item -> hard stop per request
-            fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-            if fal_safety:
-                i = fal_safety[0]
-                raise RuntimeError(fal_errs[i]["msg"])
+            # Only halt on safety if NO successes
             if not fal_succ:
+                fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                if fal_safety:
+                    i = fal_safety[0]
+                    raise RuntimeError(fal_errs[i]["msg"])
                 any_err = next((v["msg"] for v in fal_errs.values()), next((v["msg"] for v in g_errs1.values()), "All providers failed"))
                 raise RuntimeError(any_err)
+
             # partial or full success on FAL
             imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
             images_tensor = stack_images_same_size(imgs_out, debug_log)
             text_out = ""
             if want_text:
                 text_out = "\n".join(fal_texts[i] for i in sorted(fal_texts.keys()) if fal_texts.get(i))
-            # Log failures
             if len(fal_succ) < N:
                 failures = sorted(set(all_indices) - set(fal_succ.keys()))
                 for i in failures:
@@ -858,13 +882,7 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
             timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
         )
 
-        # If FAL has any safety block -> STOP workflow immediately with that error
-        fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-        if fal_safety:
-            i = fal_safety[0]
-            raise RuntimeError(fal_errs[i]["msg"])
-
-        # Merge final successes from both providers
+        # --- Merge successes first (Google + FAL) ---
         final_success_imgs: dict[int, torch.Tensor] = dict(g_succ_all)
         final_success_imgs.update(fal_succ)
 
@@ -874,14 +892,18 @@ class PVL_Google_NanoBanana_API_mandatory_IMG:
                 prev = final_texts.get(i, "")
                 final_texts[i] = (prev + ("\n" if prev else "") + t) if prev else t
 
+        # --- Only halt on FAL safety if NOTHING succeeded overall ---
         if not final_success_imgs:
-            # None succeeded anywhere -> raise with representative error
+            fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+            if fal_safety:
+                i = fal_safety[0]
+                raise RuntimeError(fal_errs[i]["msg"])
             any_err = (next((v["msg"] for v in fal_errs.values()), None)
                        or next((v["msg"] for v in g_errs2.values()), None)
                        or next((v["msg"] for v in g_errs1.values()), "All providers failed"))
             raise RuntimeError(any_err)
 
-        # Print errors for any still failing after FAL
+        # Report residual failures
         ultimately_failed = sorted(set(all_indices) - set(final_success_imgs.keys()))
         for i in ultimately_failed:
             msg = (fal_errs.get(i, {}) or g_errs2.get(i, {}) or g_errs1.get(i, {})).get("msg", "Unknown error")

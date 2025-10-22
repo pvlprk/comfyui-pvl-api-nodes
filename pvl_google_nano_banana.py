@@ -3,25 +3,26 @@
 # Author: PVL
 # License: MIT
 #
-# Updated: Selective retry + robust error policy
+# Error/Retry policy:
 # - Google pass for all.
-# - Retry Google ONCE for retryable (408/429/5xx, overload/quota/timeout) failures only.
+# - Retry Google ONCE only for retryable (408/429/5xx, overload/quota/timeout) failures.
 # - Do NOT retry Google on 4xx like 400 INVALID_ARGUMENT, 403 PERMISSION_DENIED.
-# - If Google safety block (promptFeedback.blockReason or finishReason=SAFETY) -> NO Google retry; route to FAL.
-# - Remaining failures -> FAL (once).
-# - If FAL reports safety/policy error for any item -> raise immediately (halt workflow) with API error.
-# - If none succeed overall -> raise error; else return only successful outputs and print errors for failed items.
+# - Treat Google safety blocks (promptFeedback.blockReason or finishReason=SAFETY) as non-retryable → route to FAL.
+# - Remaining failures → FAL (once).
+# - IMPORTANT CHANGE (as requested): If FAL reports safety/policy errors but there are ANY successes (from Google or FAL),
+#   DO NOT halt — return only the successful generations and log failed indices.
+#   If NO items succeeded overall and FAL reports safety/policy on any item → halt and raise that safety error.
 #
 # Requires:
 #   pip install google-genai requests pillow numpy torch
 
 import os
 import io
+import re
 import json
+import time
 import base64
 import typing as T
-import time
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -125,19 +126,15 @@ def _data_url(mime: str, raw: bytes) -> str:
 _GOOD_FINISH = {None, "STOP", "FINISH_REASON_UNSPECIFIED"}
 
 def _gemini_block_or_abort_msg(resp) -> T.Optional[str]:
-    """
-    Returns a human-readable error if the SDK response indicates a block or abnormal finish.
-    Works with google-genai SDK objects (prompt_feedback, candidates[].finish_reason).
-    """
+    """Return error message if prompt blocked or abnormal finishReason present in 200-OK."""
     try:
-        pf = getattr(resp, "prompt_feedback", None) or getattr(resp, "promptFeedback", None)
-        if pf:
-            br = getattr(pf, "block_reason", None) or getattr(pf, "blockReason", None)
+        fb = getattr(resp, "prompt_feedback", None) or getattr(resp, "promptFeedback", None)
+        if fb:
+            br = getattr(fb, "block_reason", None) or getattr(fb, "blockReason", None)
             if br:
                 return f"Prompt blocked (blockReason={br})"
     except Exception:
         pass
-
     try:
         cands = getattr(resp, "candidates", None) or []
         if not cands:
@@ -149,16 +146,16 @@ def _gemini_block_or_abort_msg(resp) -> T.Optional[str]:
         pass
     return None
 
-# ----------------- error classification helpers -----------------
-
 def _parse_http_code_from_msg(msg: str) -> T.Optional[int]:
-    import re as _re
-    m = _re.search(r'\bHTTP\s+(\d{3})\b', msg, flags=_re.I)
-    if m:
-        return int(m.group(1))
-    m = _re.search(r'\bstatus\s*[:=]?\s*(\d{3})\b', msg, flags=_re.I)
-    if m:
-        return int(m.group(1))
+    try:
+        m = re.search(r"\bHTTP[^\d]*(\d{3})\b", msg, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m2 = re.search(r"\b(code|status)\s*[:=]\s*(\d{3})\b", msg, re.IGNORECASE)
+        if m2:
+            return int(m2.group(2))
+    except Exception:
+        pass
     return None
 
 def _classify_google_error(msg: str) -> T.Tuple[bool, bool]:
@@ -311,37 +308,9 @@ class PVL_Google_NanoBanana_API:
                 "max_output_tokens": int(_MAX_TOKENS),
                 "response_modalities": ["IMAGE", "TEXT"] if want_text else ["IMAGE"],
                 "image_config": {"aspect_ratio": aspect_ratio},
-                "safety_settings": [
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                ],
             }
 
-    def _build_call_prompts(self, base_prompts: T.List[str], num_images: int, debug: bool) -> T.List[str]:
-        """
-        Maps prompts to calls:
-        - If len(prompts) >= num_images: take first num_images
-        - If len(prompts) < num_images: repeat the last prompt to fill N
-        """
-        N = max(1, int(num_images))
-        if not base_prompts:
-            return [""]
-        if len(base_prompts) >= N:
-            call_prompts = base_prompts[:N]
-        else:
-            if debug:
-                print(f"[PVL NANO NODE] Provided {len(base_prompts)} prompts but num_images={N}. "
-                      f"Reusing the last prompt for remaining calls.")
-                print(f"[PVL NANO WARNING] prompt list shorter than num_images ({len(base_prompts)} < {N}). "
-                      f"Last entry will be reused for the remaining {N - len(base_prompts)} calls.")
-            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
-        if debug:
-            for i, cp in enumerate(call_prompts, 1):
-                show = cp if len(cp) <= 160 else (cp[:157] + "...")
-                print(f"[PVL NANO NODE] Call {i} prompt: {show}")
-        return call_prompts
+    # -------- Google low-level call --------
 
     def _single_google_call(self, client, model: str, parts: list, cfg, request_id: str, debug: bool):
         kwargs = {}
@@ -383,6 +352,38 @@ class PVL_Google_NanoBanana_API:
                     if t:
                         texts.append(t)
         return imgs, texts, resp
+
+    # -------- parallel Google --------
+
+    def _parallel_google_batch(self, indices: T.List[int], prompts: T.List[str], client, model: str, cfg, request_id: str,
+                               images: T.Optional[torch.Tensor], mime: str, timeout: int, debug: bool):
+        succ: dict[int, torch.Tensor] = {}
+        texts: dict[int, str] = {}
+        errs: dict[int, dict] = {}
+
+        def worker(i: int):
+            p = prompts[i]
+            parts = self._build_parts(p, images, mime)
+            try:
+                imgs, txts, _resp = self._single_google_call(client, model, parts, cfg, request_id, debug)
+                if not imgs:
+                    raise RuntimeError("Empty image result from Google")
+                succ[i] = imgs[0]
+                if txts:
+                    texts[i] = "\n".join(txts)
+            except Exception as e:
+                msg = str(e)
+                retryable, safety = _classify_google_error(msg)
+                errs[i] = {"msg": msg, "retryable": retryable, "safety": safety}
+                if debug:
+                    print(f"[GOOGLE ERROR] (item {i+1}) {msg} | retryable={retryable} safety={safety}", flush=True)
+
+        with ThreadPoolExecutor(max_workers=min(len(indices), 8)) as ex:
+            futs = [ex.submit(worker, i) for i in indices]
+            for _ in as_completed(futs):
+                pass
+
+        return succ, texts, errs
 
     # -------- FAL Queue API - TWO PHASE EXECUTION --------
 
@@ -429,12 +430,7 @@ class PVL_Google_NanoBanana_API:
         status_url = sub.get("status_url") or f"{base}/{route.strip()}/requests/{req_id}/status"
         resp_url = sub.get("response_url") or f"{base}/{route.strip()}/requests/{req_id}"
 
-        return {
-            "request_id": req_id,
-            "status_url": status_url,
-            "response_url": resp_url,
-            "prompt": prompt
-        }
+        return {"request_id": req_id, "status_url": status_url, "response_url": resp_url}
 
     def _fal_poll_and_fetch(self, request_info: dict, fal_key: str, timeout: int, debug: bool):
         headers = {"Authorization": f"Key {fal_key}"}
@@ -521,62 +517,18 @@ class PVL_Google_NanoBanana_API:
 
         return images_out[0], description
 
-    # -------- parallel helpers with classification --------
-
-    def _parallel_google_batch(self, indices: T.List[int], prompts: T.List[str],
-                               client, model, cfg, request_id: str,
-                               images, input_mime: str, timeout_sec: int, debug: bool):
-        """
-        Returns: (success_map, text_map, error_info)
-            success_map: idx -> image_tensor
-            text_map:    idx -> joined_text
-            error_info:  idx -> {"msg": str, "retryable": bool, "safety": bool}
-        """
-        success_map: dict[int, torch.Tensor] = {}
-        text_map: dict[int, str] = {}
-        error_info: dict[int, dict] = {}
-
-        def worker(idx: int, ptxt: str):
-            try:
-                parts = self._build_parts(ptxt, images, input_mime)
-                g_imgs, g_texts, resp = self._single_google_call(client, model, parts, cfg, request_id, debug)
-                if g_imgs:
-                    success_map[idx] = g_imgs[0]
-                    if g_texts:
-                        text_map[idx] = "\n".join(g_texts)
-                else:
-                    raise RuntimeError("Gemini returned no images")
-            except Exception as e:
-                msg = str(e)
-                retryable, safety = _classify_google_error(msg)
-                error_info[idx] = {"msg": msg, "retryable": retryable, "safety": safety}
-                print(f"[GOOGLE ERROR] (item {idx+1}) {msg} | retryable={retryable} safety={safety}", flush=True)
-
-        with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as ex:
-            futs = [ex.submit(worker, i, prompts[i]) for i in indices]
-            for _ in as_completed(futs):
-                pass
-
-        return success_map, text_map, error_info
-
-    def _parallel_fal_batch(self, indices: T.List[int], prompts: T.List[str],
-                            fal_key: str, route: str, images, input_mime: str,
-                            timeout_sec: int, output_format: str,
+    def _parallel_fal_batch(self, indices: T.List[int], prompts: T.List[str], fal_key: str, route: str,
+                            images: T.Optional[torch.Tensor], mime: str, timeout: int, output_format: str,
                             aspect_ratio: str, sync_mode: bool, debug: bool):
-        """
-        Returns (success_map, text_map, error_info) analogous to Google batch.
-        """
+        submit_map: dict[int, dict] = {}
         success_map: dict[int, torch.Tensor] = {}
         text_map: dict[int, str] = {}
         error_info: dict[int, dict] = {}
 
         # Phase 1: submit
-        submit_map: dict[int, dict] = {}
-
-        def submit_worker(idx: int, ptxt: str):
+        def submit_worker(idx: int):
             try:
-                req = self._fal_submit_only(route, ptxt, images, input_mime, fal_key,
-                                            timeout_sec, debug, output_format, aspect_ratio, sync_mode)
+                req = self._fal_submit_only(route, prompts[idx], images, mime, fal_key, timeout, debug, output_format, aspect_ratio, sync_mode)
                 submit_map[idx] = req
             except Exception as e:
                 msg = f"FAL submit failed: {e}"
@@ -585,7 +537,7 @@ class PVL_Google_NanoBanana_API:
                 print(f"[FAL ERROR] (item {idx+1}) {msg} | retryable={retryable} safety={safety}", flush=True)
 
         with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as ex:
-            futs = [ex.submit(submit_worker, i, prompts[i]) for i in indices]
+            futs = [ex.submit(submit_worker, i) for i in indices]
             for _ in as_completed(futs):
                 pass
 
@@ -594,7 +546,7 @@ class PVL_Google_NanoBanana_API:
             if idx in error_info:
                 return
             try:
-                img, txt = self._fal_poll_and_fetch(req_info, fal_key, timeout_sec, debug)
+                img, txt = self._fal_poll_and_fetch(req_info, fal_key, timeout, debug)
                 success_map[idx] = img
                 if txt:
                     text_map[idx] = txt
@@ -612,6 +564,15 @@ class PVL_Google_NanoBanana_API:
         return success_map, text_map, error_info
 
     # -------- main --------
+
+    def _build_call_prompts(self, base_prompts: T.List[str], num_images: int, debug: bool) -> T.List[str]:
+        calls: T.List[str] = []
+        for p in base_prompts:
+            for _ in range(max(1, int(num_images))):
+                calls.append(p)
+        if debug:
+            print(f"[PVL NANO Debug] Built {len(calls)} calls from {len(base_prompts)} base prompts x{num_images}")
+        return calls
 
     def run(
         self,
@@ -660,7 +621,7 @@ class PVL_Google_NanoBanana_API:
         input_mime = "image/png" if str(output_format).lower() == "png" else "image/jpeg"
         want_text = bool(capture_text_output)
 
-        # Decide FAL route based on presence of input images
+        # FAL route by presence of input images
         route_to_use = fal_route_img2img if (images is not None and torch.is_tensor(images) and images.numel() > 0) else fal_route_txt2img
 
         # FAL-only fast path
@@ -672,21 +633,28 @@ class PVL_Google_NanoBanana_API:
                 all_indices, call_prompts, fal_key, route_to_use, images, input_mime,
                 timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
             )
-            # FAL safety → stop immediately
-            fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-            if fal_safety:
-                i = fal_safety[0]
-                raise RuntimeError(fal_errs[i]["msg"])
+            # Only halt if NO successes and we have FAL safety/policy
             if not fal_succ:
+                fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                if fal_safety:
+                    i = fal_safety[0]
+                    raise RuntimeError(fal_errs[i]["msg"])
                 any_err = next((v["msg"] for v in fal_errs.values()), "FAL failed with unknown error")
                 raise RuntimeError(any_err)
+
+            # Partial success is OK: return only successes
             imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
             images_tensor = stack_images_same_size(imgs_out, debug_log)
             text_out = ""
             if want_text:
                 text_out = "\n".join(fal_texts[i] for i in sorted(fal_texts.keys()) if fal_texts.get(i))
-            print(f"[PVL NANO INFO] FAL force mode: {len(fal_succ)}/{N} succeeded; returning successes only.")
-            print(f"[PVL INFO] Completed in {time.time()-t0:.2f}s")
+            if len(fal_succ) < N:
+                failures = sorted(set(all_indices) - set(fal_succ.keys()))
+                for i in failures:
+                    msg = fal_errs.get(i, {}).get("msg", "Unknown FAL error")
+                    print(f"[PVL NANO ERROR] Item {i+1} failed after FAL: {msg}")
+                print(f"[PVL NANO WARNING] Returning only {len(fal_succ)}/{N} successful results (FAL).")
+            print(f"[PVL NANO INFO] Completed in {time.time()-t0:.2f}s")
             return text_out, images_tensor
 
         # Google path
@@ -701,11 +669,11 @@ class PVL_Google_NanoBanana_API:
                     all_indices, call_prompts, fal_key, route_to_use, images, input_mime,
                     timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
                 )
-                fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-                if fal_safety:
-                    i = fal_safety[0]
-                    raise RuntimeError(fal_errs[i]["msg"])
                 if not fal_succ:
+                    fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                    if fal_safety:
+                        i = fal_safety[0]
+                        raise RuntimeError(fal_errs[i]["msg"])
                     any_err = next((v["msg"] for v in fal_errs.values()), "FAL failed with unknown error")
                     raise RuntimeError(any_err)
                 imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
@@ -713,6 +681,12 @@ class PVL_Google_NanoBanana_API:
                 text_out = ""
                 if want_text:
                     text_out = "\n".join(fal_texts[i] for i in sorted(fal_texts.keys()) if fal_texts.get(i))
+                if len(fal_succ) < N:
+                    failures = sorted(set(all_indices) - set(fal_succ.keys()))
+                    for i in failures:
+                        msg = fal_errs.get(i, {}).get("msg", "Unknown FAL error")
+                        print(f"[PVL NANO ERROR] Item {i+1} failed after FAL: {msg}")
+                    print(f"[PVL NANO WARNING] Returning only {len(fal_succ)}/{N} successful results (FAL).")
                 print(f"[PVL NANO INFO] Google unavailable. FAL successes: {len(fal_succ)}/{N}. Completed in {time.time()-t0:.2f}s")
                 return text_out, images_tensor
             else:
@@ -751,12 +725,11 @@ class PVL_Google_NanoBanana_API:
                 all_indices, call_prompts, fal_key, route_to_use, images, input_mime,
                 timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
             )
-            # Safety on FAL → immediate stop
-            fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-            if fal_safety:
-                i = fal_safety[0]
-                raise RuntimeError(fal_errs[i]["msg"])
             if not fal_succ:
+                fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+                if fal_safety:
+                    i = fal_safety[0]
+                    raise RuntimeError(fal_errs[i]["msg"])
                 any_err = next((v["msg"] for v in fal_errs.values()), next((v["msg"] for v in g_errs1.values()), "All providers failed"))
                 raise RuntimeError(any_err)
             imgs_out = [fal_succ[i] for i in sorted(fal_succ.keys())]
@@ -834,7 +807,7 @@ class PVL_Google_NanoBanana_API:
                 any_err = (next((v["msg"] for v in g_errs2.values()), None) or next((v["msg"] for v in g_errs1.values()), "Google failed"))
                 raise RuntimeError(any_err)
 
-        # FAL for remaining
+        # -------- FAL for remaining --------
         send_list = sorted(send_to_fal)
         if debug_log:
             print(f"[PVL NANO Debug] Switching remaining failures to FAL: {[i+1 for i in send_list]}")
@@ -844,13 +817,7 @@ class PVL_Google_NanoBanana_API:
             timeout_sec, output_format, aspect_ratio, sync_mode, debug_log
         )
 
-        # FAL safety → immediate stop
-        fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
-        if fal_safety:
-            i = fal_safety[0]
-            raise RuntimeError(fal_errs[i]["msg"])
-
-        # Merge successes
+        # --- Merge successes first (Google + FAL) ---
         final_success_imgs: dict[int, torch.Tensor] = dict(g_succ_all)
         final_success_imgs.update(fal_succ)
 
@@ -860,7 +827,12 @@ class PVL_Google_NanoBanana_API:
                 prev = final_texts.get(i, "")
                 final_texts[i] = (prev + ("\n" if prev else "") + t) if prev else t
 
+        # --- Only halt on safety if NOTHING succeeded overall ---
         if not final_success_imgs:
+            fal_safety = [i for i, info in fal_errs.items() if info.get("safety")]
+            if fal_safety:
+                i = fal_safety[0]
+                raise RuntimeError(fal_errs[i]["msg"])
             any_err = (next((v["msg"] for v in fal_errs.values()), None)
                        or next((v["msg"] for v in g_errs2.values()), None)
                        or next((v["msg"] for v in g_errs1.values()), "All providers failed"))

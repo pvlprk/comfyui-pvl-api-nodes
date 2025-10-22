@@ -3,7 +3,7 @@
 # Batch-wise selective retries + Gemini error detection
 # Prints total execution time always, even when debug is off.
 
-import os, io, time, base64, json
+import os, io, time, base64, json, random
 from typing import Any, Dict, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -97,8 +97,8 @@ def _extract_text(resp_json: Dict[str, Any]) -> str:
 # -----------------------------
 # Error detection (aligned to Gemini docs)
 # - Non-200: standard Google error model {"error":{code,message,status}}
-# - 200 but blocked: promptFeedback.blockReason present
-# - 200 but candidate stopped abnormally: candidates[0].finishReason in {SAFETY, RECITATION, OTHER, BLOCKLIST, ...}
+# - 200 but blocked: promptFeedback.blockReason present  -> non-retryable
+# - 200 but abnormal finishReason: treat non-retryable (e.g., SAFETY, RECITATION)
 # -----------------------------
 _GOOD_FINISH = {"STOP", "FINISH_REASON_UNSPECIFIED", None}
 
@@ -138,12 +138,34 @@ def _post(url: str, payload: Dict[str, Any], api_key: str, timeout: int, debug: 
         _log_debug(debug, f"Raw response (trunc 20k): {resp.text[:20000]}")
     return resp
 
+# ----- retry classification helpers -----
+
+_RETRY_HTTP_CODES = {408, 429, 500, 502, 503, 504}
+_NONRETRY_HTTP_CODES = {400, 401, 403, 404}
+
+def _is_retryable_http(code: Optional[int], status_str: Optional[str]) -> bool:
+    # Busy/high-traffic signals: 429/503 or status RESOURCE_EXHAUSTED / UNAVAILABLE
+    if code in _RETRY_HTTP_CODES:
+        return True
+    if status_str:
+        s = str(status_str).upper()
+        if "RESOURCE_EXHAUSTED" in s or "UNAVAILABLE" in s:
+            return True
+    return False
+
+def _is_nonretryable_http(code: Optional[int]) -> bool:
+    return code in _NONRETRY_HTTP_CODES
+
+def _jitter_delay(base: float) -> float:
+    # small +/- 30% jitter to avoid stampede
+    return base * (0.7 + 0.6 * random.random())
+
 def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
                    pil_img: Optional[Image.Image], timeout: int, temperature: float,
-                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str, int, bool]:
     """
-    Single request (no looping). Returns (ok, text_or_error).
-    Detects Gemini-specific block/error states inside HTTP 200.
+    Single request (no looping).
+    Returns (ok, text_or_error, http_code_or_200, retryable_hint).
     """
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
@@ -156,61 +178,70 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
 
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
-    def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int]]:
+    def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int], bool]:
         url = _gen_url(model, api_ver)
         payload = json.loads(json.dumps(base_payload))
         if sys_instr is not None:
             payload[sys_key] = sys_instr
 
         resp = _post(url, payload, api_key, timeout, debug, sys_key)
+
         # Non-200 => standard Google error envelope ({"error": {...}})
         if resp.status_code != 200:
             try:
                 j = resp.json()
             except Exception:
-                return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code
+                # treat unknown non-200 as retryable if it's a network-ish code
+                retryable = _is_retryable_http(resp.status_code, None)
+                return False, f"HTTP {resp.status_code} at {url}: {resp.text[:1000]}", resp.status_code, retryable
             err = (j.get("error") or {})
             code = err.get("code")
             msg = err.get("message") or resp.text[:800]
             status = err.get("status")
-            return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code
 
-        # 200 OK => still might be blocked or abnormal finishReason
+            if _is_nonretryable_http(code):
+                return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code, False
+
+            retryable = _is_retryable_http(code, status)
+            return False, f"HTTP {resp.status_code} error ({status or code}): {msg}", resp.status_code, retryable
+
+        # 200 OK => still might be blocked or abnormal finishReason (both non-retryable)
         data = resp.json()
         block = _is_blocked_prompt(data)
         if block:
-            return False, block, 200
+            return False, block, 200, False
         fr_err = _finish_reason_error(data)
         if fr_err:
-            return False, fr_err, 200
+            return False, fr_err, 200, False
 
         text = _extract_text(data)
         if not text:
-            return False, "Empty text in successful response", 200
-        return True, text, 200
+            # treat as non-retryable: server said OK but gave nothing meaningful
+            return False, "Empty text in successful response", 200, False
+        return True, text, 200, False
 
     # First, try v1beta with "system_instruction", then fallback to "systemInstruction" if needed,
     # then try v1 similarly as a compatibility fallback.
-    ok, res, code = try_one_endpoint(PRIMARY_VER, "system_instruction")
+    ok, res, code, retryable = try_one_endpoint(PRIMARY_VER, "system_instruction")
     if ok:
-        return True, res
+        return True, res, 200, False
 
-    # Some deployments accept camelCase
+    # Some deployments accept camelCase — only worth doing if the error suggested a system_instruction issue
     if code == 400 and ("system_instruction" in res or "systemInstruction" in res):
-        ok2, res2, code2 = try_one_endpoint(PRIMARY_VER, "systemInstruction")
+        ok2, res2, code2, retry2 = try_one_endpoint(PRIMARY_VER, "systemInstruction")
         if ok2:
-            return True, res2
-        # continue to fallback after this path; record last error
-        res, code = res2, code2
+            return True, res2, 200, False
+        res, code, retryable = res2, code2, retry2
 
     # 404s and certain model/version mismatches: try fallback API version
     if code == 404:
-        ok3, res3, _ = try_one_endpoint(FALLBACK_VER, "system_instruction")
+        ok3, res3, code3, retry3 = try_one_endpoint(FALLBACK_VER, "system_instruction")
         if ok3:
-            return True, res3
-        return False, res3
+            return True, res3, 200, False
+        # if it's still a 404, it's non-retryable; otherwise inherit retry hint
+        return False, res3, code3 or 404, _is_retryable_http(code3, None)
 
-    return False, res
+    return False, res, code or 0, retryable
 
 # -----------------------------
 # Node
@@ -277,6 +308,7 @@ class PVL_Gemini_API:
         # Results and state
         results: Dict[int, str] = {}          # successful outputs
         last_errors: Dict[int, str] = {}      # last error message per index
+        hard_fail: List[int] = []             # indices with non-retryable failures
 
         pending = list(range(batch))          # indices that still need a good answer
         attempt = 0
@@ -287,11 +319,9 @@ class PVL_Gemini_API:
             if debug:
                 _log_debug(debug, f"Retry round {attempt}/{tries} for indices: {[p+1 for p in pending]}")
 
-            # Build call set only for pending indices
-            def _call(idx: int) -> Tuple[int, bool, str]:
-                # idx is 0-based; for logs show 1-based
+            def _call(idx: int) -> Tuple[int, bool, str, bool]:
                 ptxt = make_variant(idx + 1)
-                ok, out_or_err = _generate_once(
+                ok, out_or_err, http_code, retryable = _generate_once(
                     api_key=key,
                     model=model,
                     instructions=instructions or "",
@@ -303,40 +333,41 @@ class PVL_Gemini_API:
                     top_k=top_k,
                     debug=debug,
                 )
-                return (idx, ok, out_or_err)
+                return (idx, ok, out_or_err, retryable)
 
-            round_fails: List[int] = []
+            next_round: List[int] = []
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futs = {ex.submit(_call, idx): idx for idx in pending}
                 for fut in as_completed(futs):
-                    idx, ok, payload = fut.result()
+                    idx, ok, payload, retryable = fut.result()
                     if ok:
                         results[idx] = payload.strip()
-                        # clear any old error
-                        if idx in last_errors:
-                            last_errors.pop(idx, None)
+                        last_errors.pop(idx, None)
                     else:
                         last_errors[idx] = payload
-                        round_fails.append(idx)
+                        # retry only if retryable; otherwise mark hard fail
+                        if retryable:
+                            next_round.append(idx)
+                        else:
+                            hard_fail.append(idx)
                         print(f"[PVL_GEMINI] (batch item {idx+1}) API error: {payload}", flush=True)
 
-            # Prepare next round with only those that failed in this round
-            pending = round_fails
+            pending = next_round
 
-            # Small backoff between rounds (linear)
+            # Backoff only if there are retryable failures remaining
             if pending and attempt < tries:
-                time.sleep(min(2 * attempt, 6))
+                # linear backoff 2s, 4s, 6s with jitter to help when model is busy
+                base = min(2 * attempt, 6)
+                time.sleep(_jitter_delay(base))
 
-        # After all attempts, if any pending remain => fail hard with the last API error
-        if pending:
-            # Choose a representative error: prefer the first pending index's last error
-            first_idx = pending[0]
+        # If anything is left pending, they exhausted retries and still failed
+        failed = sorted(set(pending + hard_fail))
+        if failed:
+            first_idx = failed[0]
             msg = last_errors.get(first_idx, "Unknown error")
-            # Aggregate list for easier debugging
-            failed_str = ", ".join(str(i + 1) for i in pending)
+            failed_str = ", ".join(str(i + 1) for i in failed)
             raise RuntimeError(f"Gemini API failed for batch item(s) {failed_str}: {msg}")
 
-        # Combine results in index order with delimiter
         combined = " {} ".format(delimiter).join(results[i] for i in range(batch))
 
         elapsed = time.time() - start_time

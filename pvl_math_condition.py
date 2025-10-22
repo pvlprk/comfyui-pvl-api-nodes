@@ -26,7 +26,7 @@ def _to_bool(x):
 
 
 class _SafeEvaluator(ast.NodeVisitor):
-    """Safe evaluator supporting numbers, a,b,c, and +,-,*,/,//,%,**, unary +/-, parentheses."""
+    """Safe evaluator supporting numbers, a,b,c,d, and +,-,*,/,//,%,**, unary +/-, parentheses."""
 
     _bin_ops = {
         ast.Add: operator.add,
@@ -80,13 +80,13 @@ class _SafeEvaluator(ast.NodeVisitor):
         raise ValueError("Unsupported expression element")
 
 
-def _safe_eval(expr: str, a=0.0, b=0.0, c=0.0) -> float:
+def _safe_eval(expr: str, a=0.0, b=0.0, c=0.0, d=0.0) -> float:
     expr = (expr or "").strip()
     if not expr:
         return 0.0
     try:
         tree = ast.parse(expr, mode="eval")
-        evaluator = _SafeEvaluator({"a": a, "b": b, "c": c})
+        evaluator = _SafeEvaluator({"a": a, "b": b, "c": c, "d": d})
         val = evaluator.visit(tree)
         return float(val)
     except Exception:
@@ -101,6 +101,7 @@ class PVL_MathCondition:
                 "a": (any, {"default": 0.0}),
                 "b": (any, {"default": 0.0}),
                 "c": (any, {"default": 0.0}),
+                "d": (any, {"default": 0.0}),
             },
             "required": {
                 "evaluate": (any, {"default": 0}),
@@ -113,9 +114,9 @@ class PVL_MathCondition:
     FUNCTION = "execute"
     CATEGORY = "essentials_mb/utilities"
 
-    def execute(self, evaluate, on_true, on_false, a=0.0, b=0.0, c=0.0):
+    def execute(self, evaluate, on_true, on_false, a=0.0, b=0.0, c=0.0, d=0.0):
         expr = on_true if _to_bool(evaluate) else on_false
-        result_float = _safe_eval(expr, a, b, c)
+        result_float = _safe_eval(expr, a, b, c, d)
         try:
             result_int = int(result_float)
         except Exception:
