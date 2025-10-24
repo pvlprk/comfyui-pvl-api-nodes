@@ -173,5 +173,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL Compare": "PVL Compare",
     "PVL_Image_Translation_Offset": "PVL Image Translation Offset Detector",
     "PVL_ImageComposite": "PVL Image Composite",
-    "PVL_FlowMatchEulerSigmas": "FlowMatch Euler (Sigmas)",
+    "PVL_FlowMatchEulerSigmas": "PVL FlowMatch Euler Sigmas",
 }
