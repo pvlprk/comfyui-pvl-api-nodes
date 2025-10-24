@@ -5,3 +5,4 @@ torch>=1.13.0
 numpy>=1.21.0
 fal-client>=0.7.0
 google-genai>=1.41.0
+diffusers>=0.35.1

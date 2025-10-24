@@ -32,6 +32,7 @@ from .pvl_fal_qwen_txt2img import PVL_fal_QwenImage_API
 from .pvl_fal_flux_pulid import PVL_fal_FluxPulid
 from .pvl_google_nano_banana_multi_img import PVL_Google_NanoBanana_Multi_API
 from .pvl_gemini_api import PVL_Gemini_API
+from .pvl_gemini_api_multi import PVL_Gemini_API_Multi
 from .pvl_txt import PVL_Txt
 from .pvl_boolean_logic import PVL_BooleanLogic
 from .pvl_any2string import PVL_Any2String
@@ -51,6 +52,10 @@ from .pvl_math import PVL_Math
 from .pvl_comfydeploy_lora_prep import PVL_ComfyDeploy_LoraPrep
 from .pvl_comfydeploy_universal import PVL_ComfyDeploy_Universal
 from .pvl_compare import PVL_Compare
+from .pvl_image_translation_offset import PVL_Image_Translation_Offset
+from .pvl_image_composite import PVL_ImageComposite
+from .pvl_flowmatch_euler_sigmas import PVL_FlowMatchEulerSigmas
+
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -87,6 +92,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_FluxPulid": PVL_fal_FluxPulid,
     "PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API,
     "PVL_Gemini_API": PVL_Gemini_API,
+    "PVL_Gemini_API_Multi": PVL_Gemini_API_Multi,
     "PVL_Txt": PVL_Txt,
     "PVL_BooleanLogic": PVL_BooleanLogic,
     "PVL_Any2String": PVL_Any2String,
@@ -106,6 +112,9 @@ NODE_CLASS_MAPPINGS = {
     "PVL_ComfyDeploy_LoraPrep": PVL_ComfyDeploy_LoraPrep,
     "PVL_ComfyDeploy_Universal": PVL_ComfyDeploy_Universal,
     "PVL Compare": PVL_Compare,
+    "PVL_Image_Translation_Offset": PVL_Image_Translation_Offset,
+    "PVL_ImageComposite": PVL_ImageComposite,
+    "PVL_FlowMatchEulerSigmas": PVL_FlowMatchEulerSigmas,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -142,6 +151,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_FluxPulid": "PVL Flux PuLID (fal.ai)",
     "PVL_Google_NanoBanana_Multi_API": "PVL Google NanoBanana API Multi",
     "PVL_Gemini_API": "PVL Gemini Api",
+    "PVL_Gemini_API_Multi": "PVL - Gemini Api Multi",
     "PVL_Txt": "PVL Txt",
     "PVL_BooleanLogic": "PVL BooleanLogic",
     "PVL_Any2String": "PVL Any To String",
@@ -161,4 +171,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_ComfyDeploy_LoraPrep": "PVL - ComfyDeploy_LoraPrep",
     "PVL_ComfyDeploy_Universal": "PVL - PVL_ComfyDeploy_Universal",
     "PVL Compare": "PVL Compare",
+    "PVL_Image_Translation_Offset": "PVL Image Translation Offset Detector",
+    "PVL_ImageComposite": "PVL Image Composite",
+    "PVL_FlowMatchEulerSigmas": "FlowMatch Euler (Sigmas)",
 }

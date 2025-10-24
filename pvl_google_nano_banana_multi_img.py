@@ -224,7 +224,18 @@ class PVL_Google_NanoBanana_Multi_API:
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": "", "placeholder": "Enter prompts separated by regex delimiter"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "model": ("STRING", {"default": DEFAULT_MODEL}),
+                "output_format": (["png", "jpeg"], {"default": "png"}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
+                "retries": ("INT", {"default":3, "min": 1, "max": 10}),
+                "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
+                "debug_log": ("BOOLEAN", {"default": False}),
+                "capture_text_output": ("BOOLEAN", {"default": False}),
+                "use_fal_fallback": ("BOOLEAN", {"default": True}),
+                "force_fal": ("BOOLEAN", {"default": False}),                                
                 "delimiter": ("STRING", {"default": "[++]", "multiline": False, "placeholder": "Regex (e.g. \\n|\\| or ;+)"}),
+                "sync_mode": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "image_1": ("IMAGE",),
@@ -236,20 +247,12 @@ class PVL_Google_NanoBanana_Multi_API:
                 "image_7": ("IMAGE",),
                 "image_8": ("IMAGE",),
                 "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2"}),
-                "model": ("STRING", {"default": DEFAULT_MODEL}),
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "output_format": (["png", "jpeg"], {"default": "png"}),
-                "capture_text_output": ("BOOLEAN", {"default": False}),
-                "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
-                "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
                 "request_id": ("STRING", {"default": ""}),
-                "debug_log": ("BOOLEAN", {"default": False}),
+
                 # FAL flags
-                "use_fal_fallback": ("BOOLEAN", {"default": True}),
-                "force_fal": ("BOOLEAN", {"default": False}),
-                "sync_mode": ("BOOLEAN", {"default": False}),
+
                 "fal_api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use FAL_KEY"}),
                 "fal_route_img2img": ("STRING", {"default": "fal-ai/nano-banana/edit"}),
                 "fal_route_txt2img": ("STRING", {"default": "fal-ai/nano-banana"}),
@@ -670,6 +673,7 @@ class PVL_Google_NanoBanana_Multi_API:
         fal_api_key: str = "",
         fal_route_img2img: str = "fal-ai/nano-banana/edit",
         fal_route_txt2img: str = "fal-ai/nano-banana",
+        retries: int = 3,
     ):
         t0 = time.time()
 
@@ -827,16 +831,25 @@ class PVL_Google_NanoBanana_Multi_API:
             print(f"[PVL NANO MULTI INFO] Completed in {time.time()-t0:.2f}s")
             return text_out, images_tensor
 
-        # PARTIAL: retry Google ONCE for retryable (non-safety)
+        # PARTIAL: retry Google for retryable (non-safety)
         g_succ2, g_texts2, g_errs2 = ({}, {}, {})
         if retryable_idxs:
             if debug_log:
-                print(f"[PVL NANO MULTI Debug] Google retry for retryable items: {[i+1 for i in retryable_idxs]}")
-            g_succ2, g_texts2, g_errs2 = self._parallel_google_batch(
-                retryable_idxs, call_prompts, client, model, cfg, request_id, image_tensors, input_mime,
-                timeout_sec, debug_log
-            )
-
+                print(f"[PVL NANO MULTI Debug] Google retry for retryable items: {[i+1 for i in retryable_idxs]} (max {retries} retries)")
+            for attempt in range(retries):
+                if debug_log and attempt > 0:
+                    print(f"[PVL NANO MULTI Debug] Retry attempt {attempt+1}/{retries}")
+                g_succ_try, g_texts_try, g_errs_try = self._parallel_google_batch(
+                    retryable_idxs, call_prompts, client, model, cfg, request_id, image_tensors, input_mime,
+                    timeout_sec, debug_log
+                )
+                g_succ2.update(g_succ_try)
+                g_texts2.update(g_texts_try)
+                # Filter remaining retryables
+                retryable_idxs = [i for i in retryable_idxs if i not in g_succ2]
+                if not retryable_idxs:
+                    break
+        
         # Merge Google results
         g_succ_all = dict(g_succ1); g_succ_all.update(g_succ2)
         g_texts_all = dict(g_texts1); g_texts_all.update(g_texts2)

@@ -221,25 +221,28 @@ class PVL_Google_NanoBanana_API:
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": "A tiny banana spaceship over a neon city."}),
-                "delimiter": ("STRING", {"default": "[++]", "multiline": False, "placeholder": "Regex delimiter e.g. [*], \\n, |"}),
-            },
-            "optional": {
-                "images": ("IMAGE",),
-                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2"}),
-                "model": ("STRING", {"default": DEFAULT_MODEL}),
-                "endpoint_override": ("STRING", {"default": ""}),
-                "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "model": ("STRING", {"default": DEFAULT_MODEL}),                
                 "output_format": (["png", "jpeg"], {"default": "png"}),
-                "capture_text_output": ("BOOLEAN", {"default": False}),
-                "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),
-                "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
-                "request_id": ("STRING", {"default": ""}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 12, "step": 1}),                
+                "retries": ("INT", {"default":3, "min": 1, "max": 10}),                
+                "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),                
                 "debug_log": ("BOOLEAN", {"default": False}),
-                # FAL flags
+                "capture_text_output": ("BOOLEAN", {"default": False}),                
                 "use_fal_fallback": ("BOOLEAN", {"default": True}),
                 "force_fal": ("BOOLEAN", {"default": False}),
+                "delimiter": ("STRING", {"default": "[++]", "multiline": False, "placeholder": "Regex delimiter e.g. [*], \\n, |"}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+
+                "images": ("IMAGE",),
+                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2"}),
+                "endpoint_override": ("STRING", {"default": ""}),
+                "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
+                "request_id": ("STRING", {"default": ""}),
+                
+                # FAL flags
                 "fal_api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use FAL_KEY"}),
                 "fal_route_img2img": ("STRING", {"default": "fal-ai/nano-banana/edit"}),
                 "fal_route_txt2img": ("STRING", {"default": "fal-ai/nano-banana"}),
