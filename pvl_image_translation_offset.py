@@ -4,7 +4,7 @@ from skimage.registration import phase_cross_correlation
 from skimage.transform import resize
 import comfy.utils
 
-class PVL_ImageTranslationOffset:
+class PVL_Image_Translation_Offset:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -118,5 +118,5 @@ class PVL_ImageTranslationOffset:
         
         return (x_offsets_str, y_offsets_str)
 
-NODE_CLASS_MAPPINGS = {"PVL_ImageTranslationOffset": PVL_ImageTranslationOffset}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_ImageTranslationOffset": "PVL Image Translation Offset Detector"}
+NODE_CLASS_MAPPINGS = {"PVL_Image_Translation_Offset": PVL_Image_Translation_Offset}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Image_Translation_Offset": "PVL Image Translation Offset Detector"}
