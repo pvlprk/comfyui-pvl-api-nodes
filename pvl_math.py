@@ -155,4 +155,4 @@ class PVL_Math:
 
 
 NODE_CLASS_MAPPINGS = {"PVL_Math": PVL_Math}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Math": "PVL — Math"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Math": "PVL Math"}

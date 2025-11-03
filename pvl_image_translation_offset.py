@@ -107,8 +107,8 @@ class PVL_Image_Translation_Offset:
             )
             
             # Append offsets with * -1 sign convention
-            x_offset = float(shift[1]) * -1
-            y_offset = float(shift[0]) * -1
+            x_offset = float(shift[1])
+            y_offset = float(shift[0])
             x_offsets.append(str(x_offset))
             y_offsets.append(str(y_offset))
         

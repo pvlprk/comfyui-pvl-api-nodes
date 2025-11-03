@@ -98,7 +98,7 @@ class PVL_ImageComposite:
         x_list = [x_list[i] + int(offset_x_list[i]) for i in range(batch_len)]
         y_list = [y_list[i] + int(offset_y_list[i]) for i in range(batch_len)]
 
-        # Now composite per image
+        # Composite per image
         output = []
         for i in range(batch_len):
             d = destination[min(i, destination.shape[0] - 1)].clone()
@@ -106,24 +106,34 @@ class PVL_ImageComposite:
             m = mask[min(i, mask.shape[0] - 1)]
 
             yi, xi = y_list[i], x_list[i]
-
-            # Clamp crop if source goes out of bounds
             sH, sW = s.shape[0], s.shape[1]
             dH, dW = d.shape[0], d.shape[1]
 
-            cropH = max(0, min(sH, dH - yi))
-            cropW = max(0, min(sW, dW - xi))
-            if cropH <= 0 or cropW <= 0:
+            # Compute overlapping region
+            src_x0 = max(0, -xi)
+            src_y0 = max(0, -yi)
+            dst_x0 = max(0, xi)
+            dst_y0 = max(0, yi)
+
+            overlap_w = min(sW - src_x0, dW - dst_x0)
+            overlap_h = min(sH - src_y0, dH - dst_y0)
+
+            # Skip if no overlap
+            if overlap_w <= 0 or overlap_h <= 0:
                 output.append(d)
                 continue
 
-            s_c = s[:cropH, :cropW, :]
-            m_c = m[:cropH, :cropW, :]
+            s_c = s[src_y0:src_y0 + overlap_h, src_x0:src_x0 + overlap_w, :]
+            m_c = m[src_y0:src_y0 + overlap_h, src_x0:src_x0 + overlap_w, :]
 
-            d[yi:yi+cropH, xi:xi+cropW, :] = s_c * m_c + d[yi:yi+cropH, xi:xi+cropW, :] * (1 - m_c)
+            d[dst_y0:dst_y0 + overlap_h, dst_x0:dst_x0 + overlap_w, :] = (
+                s_c * m_c + d[dst_y0:dst_y0 + overlap_h, dst_x0:dst_x0 + overlap_w, :] * (1 - m_c)
+            )
+
             output.append(d)
 
         return (torch.stack(output),)
+
 
 
 # Node registration

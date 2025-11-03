@@ -229,12 +229,12 @@ class PVL_Gemini_API_avatar_special:
         return {
             "required": {
                 "model": (HARDCODED_MODELS, {"default": default_model}),
-                "tries": ("INT", {"default": 2, "min": 1, "max": 10}),
-                "timeout": ("INT", {"default": 45, "min": 1, "max": 600}),
-                "temperature": ("FLOAT", {"default": 1, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "tries": ("INT",   {"default": 2,  "min": 1,   "max": 10,  "step": 1}),
+                "timeout": ("INT", {"default": 45, "min": 1,   "max": 600, "step": 5}),
+                "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "top_k": ("INT", {"default": 65, "min": 0, "max": 100}),
-                "batch": ("INT", {"default": 1, "min": 1, "max": 32}),
+                "top_k": ("INT", {"default": 65, "min": 1, "max": 1000, "step": 1}),
+                "batch": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
                 "delimiter": ("STRING", {"default": "[*]", "multiline": False}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
                 "debug": ("BOOLEAN", {"default": False}),
@@ -366,4 +366,4 @@ class PVL_Gemini_API_avatar_special:
 
 
 NODE_CLASS_MAPPINGS = {"PVL_Gemini_API_avatar_special": PVL_Gemini_API_avatar_special}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_Gemini_API_avatar_special": "PVL Gemini API (Avatar Special)"}

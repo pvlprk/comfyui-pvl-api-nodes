@@ -114,4 +114,4 @@ class PVL_BatchAny:
 
 
 NODE_CLASS_MAPPINGS = {"PVL_BatchAny": PVL_BatchAny}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_BatchAny": "PVL — Batch Any"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_BatchAny": "PVL Batch Any"}

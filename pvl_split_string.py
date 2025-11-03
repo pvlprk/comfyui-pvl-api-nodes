@@ -36,5 +36,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PVL_SplitString": "PVL — Split String",
+    "PVL_SplitString": "PVL Split String",
 }

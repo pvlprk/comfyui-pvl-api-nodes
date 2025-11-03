@@ -125,4 +125,4 @@ class PVL_MathCondition:
 
 
 NODE_CLASS_MAPPINGS = {"PVL_MathCondition": PVL_MathCondition}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_MathCondition": "PVL — Math Condition"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_MathCondition": "PVL Math Condition"}

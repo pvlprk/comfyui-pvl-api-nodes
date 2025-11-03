@@ -49,13 +49,13 @@ from .pvl_math_condition import PVL_MathCondition
 from .pvl_batch_any import PVL_BatchAny
 from .pvl_string_to_number import PVL_StringToNumber
 from .pvl_math import PVL_Math
-from .pvl_comfydeploy_lora_prep import PVL_ComfyDeploy_LoraPrep
 from .pvl_comfydeploy_universal import PVL_ComfyDeploy_Universal
 from .pvl_compare import PVL_Compare
 from .pvl_image_translation_offset import PVL_Image_Translation_Offset
 from .pvl_image_composite import PVL_ImageComposite
 from .pvl_flowmatch_euler_sigmas import PVL_FlowMatchEulerSigmas
-
+from .pvl_qwen_img_edit_inpaint import PVL_Qwen_Img_Edit_Inpaint
+from .pvl_qwen_img_edit_plus import PVL_Qwen_Img_Edit_Plus
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -109,12 +109,13 @@ NODE_CLASS_MAPPINGS = {
     "PVL_BatchAny": PVL_BatchAny,
     "PVL_StringToNumber": PVL_StringToNumber,
     "PVL_Math": PVL_Math,
-    "PVL_ComfyDeploy_LoraPrep": PVL_ComfyDeploy_LoraPrep,
     "PVL_ComfyDeploy_Universal": PVL_ComfyDeploy_Universal,
     "PVL Compare": PVL_Compare,
     "PVL_Image_Translation_Offset": PVL_Image_Translation_Offset,
     "PVL_ImageComposite": PVL_ImageComposite,
     "PVL_FlowMatchEulerSigmas": PVL_FlowMatchEulerSigmas,
+    "PVL_Qwen_Img_Edit_Inpaint": PVL_Qwen_Img_Edit_Inpaint,
+    "PVL_Qwen_Img_Edit_Plus": PVL_Qwen_Img_Edit_Plus,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -151,7 +152,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_FluxPulid": "PVL Flux PuLID (fal.ai)",
     "PVL_Google_NanoBanana_Multi_API": "PVL Google NanoBanana API Multi",
     "PVL_Gemini_API": "PVL Gemini Api",
-    "PVL_Gemini_API_Multi": "PVL - Gemini Api Multi",
+    "PVL_Gemini_API_Multi": "PVL Gemini Api Multi",
     "PVL_Txt": "PVL Txt",
     "PVL_BooleanLogic": "PVL BooleanLogic",
     "PVL_Any2String": "PVL Any To String",
@@ -161,17 +162,18 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_FluxWithLoraPulID_API": "PVL Flux Lora PulID (fal.ai)",
     "PVL_fal_FluxDevPulidAvatar_API": "PVL Flux Dev Pulid Avatar (fal.ai)",
     "PVL_Comfydeploy_Avatar_PulID_API": "PVL ComfyDeploy Avatar PulID API",
-    "PVL_Gemini_API_avatar_special": "PVL - Gemini API (Avatar Special)",
+    "PVL_Gemini_API_avatar_special": "PVL Gemini API (Avatar Special)",
     "PVL_EdgeExtend": "PVL Edge Extend",
-    "PVL_SplitString": "PVL — Split String",
-    "PVL_MathCondition": "PVL — Math Condition",
-    "PVL_BatchAny": "PVL — Batch Any",
-    "PVL_StringToNumber": "PVL — String To Number",
-    "PVL_Math": "PVL — Math",
-    "PVL_ComfyDeploy_LoraPrep": "PVL - ComfyDeploy_LoraPrep",
-    "PVL_ComfyDeploy_Universal": "PVL - PVL_ComfyDeploy_Universal",
+    "PVL_SplitString": "PVL Split String",
+    "PVL_MathCondition": "PVL Math Condition",
+    "PVL_BatchAny": "PVL Batch Any",
+    "PVL_StringToNumber": "PVL String To Number",
+    "PVL_Math": "PVL Math",
+    "PVL_ComfyDeploy_Universal": "PVL ComfyDeploy Universal",
     "PVL Compare": "PVL Compare",
     "PVL_Image_Translation_Offset": "PVL Image Translation Offset Detector",
     "PVL_ImageComposite": "PVL Image Composite",
     "PVL_FlowMatchEulerSigmas": "PVL FlowMatch Euler Sigmas",
+    "PVL_Qwen_Img_Edit_Inpaint": "PVL Qwen Image Edit Inpaint (fal.ai)",
+    "PVL_Qwen_Img_Edit_Plus": "PVL Qwen Image Edit Multi (fal.ai)",
 }

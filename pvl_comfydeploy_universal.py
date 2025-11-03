@@ -366,4 +366,4 @@ class PVL_ComfyDeploy_Universal:
         return (batch,)
 
 NODE_CLASS_MAPPINGS = {"PVL_ComfyDeploy_Universal": PVL_ComfyDeploy_Universal}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_ComfyDeploy_Universal": "PVL - PVL_ComfyDeploy_Universal"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_ComfyDeploy_Universal": "PVL ComfyDeploy Universal"}

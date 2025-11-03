@@ -58,4 +58,4 @@ class PVL_StringToNumber:
 
 # Registration
 NODE_CLASS_MAPPINGS = {"PVL_StringToNumber": PVL_StringToNumber}
-NODE_DISPLAY_NAME_MAPPINGS = {"PVL_StringToNumber": "PVL — String To Number"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PVL_StringToNumber": "PVL String To Number"}
