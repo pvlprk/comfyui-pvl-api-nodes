@@ -59,6 +59,7 @@ from .pvl_qwen_img_edit_plus import PVL_Qwen_Img_Edit_Plus
 from .pvl_switch import PVL_Switch
 from .pvl_string_concat_x3 import PVL_StringConcatX3
 from .pvl_string_concat_x8 import PVL_StringConcatX8
+from .pvl_padding import PVL_Padding
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -122,6 +123,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Switch": PVL_Switch,
     "PVL_StringConcatX3": PVL_StringConcatX3,
     "PVL_StringConcatX8": PVL_StringConcatX8,
+    "PVL_Padding": PVL_Padding,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -185,4 +187,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Switch": "PVL Switch",
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
+    "PVL_Padding": "PVL Padding",
 }
