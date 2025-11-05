@@ -1,6 +1,5 @@
 from .pvl_call_openai_assistant import CallAssistantNode
 from .pvl_comfydeploy_node import ComfyDeployNode
-from .pvl_kontext_max import PvlKontextMax
 from .pvl_checkIfNone import IsConnected
 from .pvl_fal_kontext_max_multi import PVL_fal_KontextMaxMulti_API
 from .pvl_fal_flux_with_lora import PVL_fal_FluxWithLora_API
@@ -64,7 +63,6 @@ from .pvl_padding import PVL_Padding
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
     "PVL ComfyDeploy API Caller": ComfyDeployNode,
-    "PVL KONTEXT MAX": PvlKontextMax,
     "PVLCheckIfConnected": IsConnected,
     "PVL_fal_KontextMaxMulti_API": PVL_fal_KontextMaxMulti_API,
     "PVL_fal_FluxWithLora_API": PVL_fal_FluxWithLora_API,
@@ -129,7 +127,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL Call OpenAI Assistant": "PVL Call OpenAI Assistant",
     "PVL ComfyDeploy API Caller": "PVL ComfyDeploy API Caller",
-    "PVL KONTEXT MAX": "PVL KONTEXT MAX (comfyui.org)",
     "PVLCheckIfConnected": "PVL Check If Connected",
     "PVL_fal_KontextMaxMulti_API": "PVL KONTEXT MAX MULTI (fal.ai)",
     "PVL_fal_FluxWithLora_API": "PVL FLUX DEV LORA (fal.ai)",
@@ -187,5 +184,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Switch": "PVL Switch",
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
+
     "PVL_Padding": "PVL Padding",
 }
