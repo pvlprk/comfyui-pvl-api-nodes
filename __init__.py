@@ -56,10 +56,6 @@ from .pvl_switch import PVL_Switch
 from .pvl_string_concat_x3 import PVL_StringConcatX3
 from .pvl_string_concat_x8 import PVL_StringConcatX8
 from .pvl_padding import PVL_Padding
-from .pvl_fal_segment import PVL_fal_EvfSam_API
-from .pvl_fal_segment_x5 import PVL_fal_EvfSam_X5_API
-from .pvl_fal_seg_florence2 import PVL_Seg_Florence2_API
-from .pvl_gemini_segmentation import PVL_GeminiSegmentation
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -120,10 +116,6 @@ NODE_CLASS_MAPPINGS = {
     "PVL_StringConcatX3": PVL_StringConcatX3,
     "PVL_StringConcatX8": PVL_StringConcatX8,
     "PVL_Padding": PVL_Padding,
-    "PVL_fal_EvfSam_API": PVL_fal_EvfSam_API,
-    "PVL_fal_EvfSam_X5_API": PVL_fal_EvfSam_X5_API,
-    "PVL_Seg_Florence2_API": PVL_Seg_Florence2_API,
-    "PVL_GeminiSegmentation": PVL_GeminiSegmentation,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -184,8 +176,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
     "PVL_Padding": "PVL Padding",
-    "PVL_fal_EvfSam_API": "PVL Segment (fal.ai)",
-    "PVL_fal_EvfSam_X5_API": "PVL Segment X5 (fal.ai)",
-    "PVL_Seg_Florence2_API": "PVL Seg Florence2 (fal.ai)",
-    "PVL_GeminiSegmentation": "PVL Gemini 2.5 Segmentation",
 }
