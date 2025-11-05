@@ -19,8 +19,6 @@ from .pvl_NoneOutputNode import PVL_NoneOutputNode
 from .pvl_SaveOrNot import PVL_SaveOrNot
 from .pvl_ImageResize import PVL_ImageResize
 from .pvl_ImageStitch import PVL_ImageStitch
-from .pvl_OpenPoseMatch import PVL_OpenPoseMatch
-from .pvl_OpenPoseMatch_Z import PVL_OpenPoseMatch_Z
 from .pvl_fal_nano_banana_edit import PVL_fal_NanoBanana_API
 from .pvl_stitch2size import PVL_Stitch2Size
 from .pvl_crop2AR import PVL_Crop2AR
@@ -82,8 +80,6 @@ NODE_CLASS_MAPPINGS = {
     "PVL_SaveOrNot": PVL_SaveOrNot,
     "PVL_ImageResize": PVL_ImageResize,
     "PVL_ImageStitch": PVL_ImageStitch,
-    "PVL_OpenPoseMatch": PVL_OpenPoseMatch,
-    "PVL_OpenPoseMatch_Z": PVL_OpenPoseMatch_Z,
     "PVL_fal_NanoBanana_API": PVL_fal_NanoBanana_API,
     "PVL_Stitch2Size": PVL_Stitch2Size,
     "PVL_Crop2AR": PVL_Crop2AR,
@@ -145,8 +141,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_SaveOrNot": "PVL Save Or Not",
     "PVL_ImageResize": "PVL Image Resize",
     "PVL_ImageStitch": "PVL Image Stitch",
-    "PVL_OpenPoseMatch": "PVL OpenPose Match",
-    "PVL_OpenPoseMatch_Z": "PVL OpenPose Match_Z",
     "PVL_fal_NanoBanana_API": "PVL FAL Nano-Banana Edit",
     "PVL_Stitch2Size": "PVL Stitch 2 Size",
     "PVL_Crop2AR": "PVL Crop to Aspect Ratio",
@@ -187,3 +181,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
     "PVL_Padding": "PVL Padding",
 }
+
