@@ -50,13 +50,16 @@ from .pvl_comfydeploy_universal import PVL_ComfyDeploy_Universal
 from .pvl_compare import PVL_Compare
 from .pvl_image_translation_offset import PVL_Image_Translation_Offset
 from .pvl_image_composite import PVL_ImageComposite
-from .pvl_flowmatch_euler_sigmas import PVL_FlowMatchEulerSigmas
 from .pvl_qwen_img_edit_inpaint import PVL_Qwen_Img_Edit_Inpaint
 from .pvl_qwen_img_edit_plus import PVL_Qwen_Img_Edit_Plus
 from .pvl_switch import PVL_Switch
 from .pvl_string_concat_x3 import PVL_StringConcatX3
 from .pvl_string_concat_x8 import PVL_StringConcatX8
 from .pvl_padding import PVL_Padding
+from .pvl_fal_segment import PVL_fal_EvfSam_API
+from .pvl_fal_segment_x5 import PVL_fal_EvfSam_X5_API
+from .pvl_fal_seg_florence2 import PVL_Seg_Florence2_API
+from .pvl_gemini_segmentation import PVL_GeminiSegmentation
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -111,13 +114,16 @@ NODE_CLASS_MAPPINGS = {
     "PVL Compare": PVL_Compare,
     "PVL_Image_Translation_Offset": PVL_Image_Translation_Offset,
     "PVL_ImageComposite": PVL_ImageComposite,
-    "PVL_FlowMatchEulerSigmas": PVL_FlowMatchEulerSigmas,
     "PVL_Qwen_Img_Edit_Inpaint": PVL_Qwen_Img_Edit_Inpaint,
     "PVL_Qwen_Img_Edit_Plus": PVL_Qwen_Img_Edit_Plus,
     "PVL_Switch": PVL_Switch,
     "PVL_StringConcatX3": PVL_StringConcatX3,
     "PVL_StringConcatX8": PVL_StringConcatX8,
     "PVL_Padding": PVL_Padding,
+    "PVL_fal_EvfSam_API": PVL_fal_EvfSam_API,
+    "PVL_fal_EvfSam_X5_API": PVL_fal_EvfSam_X5_API,
+    "PVL_Seg_Florence2_API": PVL_Seg_Florence2_API,
+    "PVL_GeminiSegmentation": PVL_GeminiSegmentation,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -172,13 +178,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL Compare": "PVL Compare",
     "PVL_Image_Translation_Offset": "PVL Image Translation Offset Detector",
     "PVL_ImageComposite": "PVL Image Composite",
-    "PVL_FlowMatchEulerSigmas": "PVL FlowMatch Euler Sigmas",
     "PVL_Qwen_Img_Edit_Inpaint": "PVL Qwen Image Edit Inpaint (fal.ai)",
     "PVL_Qwen_Img_Edit_Plus": "PVL Qwen Image Edit Multi (fal.ai)",
     "PVL_Switch": "PVL Switch",
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
-
     "PVL_Padding": "PVL Padding",
+    "PVL_fal_EvfSam_API": "PVL Segment (fal.ai)",
+    "PVL_fal_EvfSam_X5_API": "PVL Segment X5 (fal.ai)",
+    "PVL_Seg_Florence2_API": "PVL Seg Florence2 (fal.ai)",
+    "PVL_GeminiSegmentation": "PVL Gemini 2.5 Segmentation",
 }
-

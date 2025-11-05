@@ -18,15 +18,19 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
                 "prompt": ("STRING", {"multiline": True}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 4294967295}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 4}),
-                "output_format": (["jpeg", "png"], {"default": "jpeg"}),
+                "output_format": (["jpeg", "png"], {"default": "png"}),
                 "sync_mode": ("BOOLEAN", {"default": False}),
                 "safety_tolerance": (["1", "2", "3", "4", "5", "6"], {"default": "2"}),
-                "aspect_ratio": ("STRING", {"default": "16:9", "defaultInput": True}),
+                "aspect_ratio": ("STRING", {"default": "1:1", "defaultInput": True}),
+                # NEW controls:
+                "retries": ("INT", {"default": 2, "min": 0, "max": 10}),
+                "timeout_sec": ("INT", {"default": 50, "min": 5, "max": 600, "step": 5}),
+                "debug_log": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "delimiter": ("STRING", {"default": "[*]", "multiline": False, "placeholder": "Delimiter for splitting prompts (e.g., [*], \\n, |)"}),
-                "enable_safety_checker": ("BOOLEAN", {"default": True}),
-                "raw": ("BOOLEAN", {"default": False}),
+                "delimiter": ("STRING", {"default": "[++]", "multiline": False, "placeholder": "Delimiter for splitting prompts (e.g., [*], \\n, |)"}),
+                "enable_safety_checker": ("BOOLEAN", {"default": False}),
+                "raw": ("BOOLEAN", {"default": True}),
             }
         }
     
@@ -86,16 +90,43 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
         if len(base_prompts) >= N:
             call_prompts = base_prompts[:N]
         else:
-            print(f"[PVL WARNING] Provided {len(base_prompts)} prompts but num_images={N}. "
+            print(f"[PVL Flux Pro1.1 WARNING] Provided {len(base_prompts)} prompts but num_images={N}. "
                   f"Reusing the last prompt for remaining calls.")
             call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
         
         return call_prompts
+
+    # -------- prohibited-content detector (no-retry) --------
+    def _is_content_policy_violation(self, msg_or_json) -> bool:
+        """
+        Detect FAL's prohibited-content error (non-retryable).
+        Looks for JSON {"type": "content_policy_violation"} or the phrase in string messages.
+        """
+        try:
+            if isinstance(msg_or_json, dict):
+                et = str(msg_or_json.get("type", "")).lower()
+                if "content_policy_violation" in et:
+                    return True
+                err = msg_or_json.get("error")
+                if isinstance(err, dict):
+                    et2 = str(err.get("type", "")).lower()
+                    if "content_policy_violation" in et2:
+                        return True
+                if "content_policy_violation" in str(msg_or_json).lower():
+                    return True
+            elif isinstance(msg_or_json, str):
+                s = msg_or_json.lower()
+                if "content_policy_violation" in s:
+                    return True
+        except Exception:
+            pass
+        return False
     
     # -------- FAL Queue API - TWO PHASE EXECUTION --------
     
     def _fal_submit_only(self, prompt_text, seed, output_format, sync_mode,
-                         safety_tolerance, aspect_ratio, enable_safety_checker, raw):
+                         safety_tolerance, aspect_ratio, enable_safety_checker, raw,
+                         timeout_sec=120, debug=False):
         """
         Phase 1: Submit request to FAL and return request info immediately.
         Does NOT wait for completion.
@@ -116,12 +147,18 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
         
         # Check if ApiHandler supports async submission
         if hasattr(ApiHandler, 'submit_only'):
-            return ApiHandler.submit_only("fal-ai/flux-pro/v1.1-ultra", arguments)
+            try:
+                if 'timeout' in ApiHandler.submit_only.__code__.co_varnames:
+                    return ApiHandler.submit_only("fal-ai/flux-pro/v1.1-ultra", arguments, timeout=timeout_sec, debug=debug)
+                else:
+                    return ApiHandler.submit_only("fal-ai/flux-pro/v1.1-ultra", arguments)
+            except Exception as e:
+                raise RuntimeError(f"FAL submit_only failed: {e}")
         else:
             # Fallback to direct FAL queue API
-            return self._direct_fal_submit("fal-ai/flux-pro/v1.1-ultra", arguments)
+            return self._direct_fal_submit("fal-ai/flux-pro/v1.1-ultra", arguments, timeout_sec, debug)
     
-    def _direct_fal_submit(self, endpoint, arguments):
+    def _direct_fal_submit(self, endpoint, arguments, timeout_sec=120, debug=False):
         """Direct FAL queue API submission when ApiHandler doesn't support async."""
         fal_key = os.getenv("FAL_KEY", "")
         if not fal_key:
@@ -131,8 +168,15 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
         submit_url = f"{base}/{endpoint}"
         headers = {"Authorization": f"Key {fal_key}"}
         
-        r = requests.post(submit_url, headers=headers, json=arguments, timeout=120)
+        r = requests.post(submit_url, headers=headers, json=arguments, timeout=timeout_sec)
         if not r.ok:
+            # Try to parse JSON to detect policy violation
+            try:
+                js = r.json()
+                if self._is_content_policy_violation(js):
+                    raise RuntimeError(f"FAL content_policy_violation: {js}")
+            except Exception:
+                pass
             raise RuntimeError(f"FAL submit error {r.status_code}: {r.text}")
         
         sub = r.json()
@@ -143,20 +187,28 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
         status_url = sub.get("status_url") or f"{base}/{endpoint}/requests/{req_id}/status"
         resp_url = sub.get("response_url") or f"{base}/{endpoint}/requests/{req_id}"
         
+        if debug:
+            print(f"[FAL SUBMIT OK] request_id={req_id}")
         return {
             "request_id": req_id,
             "status_url": status_url,
             "response_url": resp_url,
         }
     
-    def _fal_poll_and_fetch(self, request_info, timeout=120):
+    def _fal_poll_and_fetch(self, request_info, timeout_sec=120, debug=False, item_idx=None, attempt=None, started_at=None):
         """
         Phase 2: Poll a single FAL request until complete and fetch the result.
-        Returns image tensor.
+        Returns a single IMAGE tensor (B,H,W,C).
         """
         # Check if ApiHandler supports async polling
         if hasattr(ApiHandler, 'poll_and_get_result'):
-            result = ApiHandler.poll_and_get_result(request_info, timeout)
+            try:
+                if 'timeout' in ApiHandler.poll_and_get_result.__code__.co_varnames:
+                    result = ApiHandler.poll_and_get_result(request_info, timeout=timeout_sec, debug=debug)
+                else:
+                    result = ApiHandler.poll_and_get_result(request_info)
+            except Exception as e:
+                raise RuntimeError(f"FAL poll_and_get_result failed: {e}")
         else:
             # Fallback to direct polling
             fal_key = os.getenv("FAL_KEY", "")
@@ -164,31 +216,52 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
             
             status_url = request_info["status_url"]
             resp_url = request_info["response_url"]
-            
+            req_id = request_info.get("request_id", "")[:16]
+
             # Poll for completion
-            deadline = time.time() + timeout
+            deadline = time.time() + timeout_sec
             completed = False
             while time.time() < deadline:
                 try:
-                    sr = requests.get(status_url, headers=headers, timeout=10)
-                    if sr.ok and sr.json().get("status") == "COMPLETED":
-                        completed = True
-                        break
-                except Exception:
-                    pass
+                    sr = requests.get(status_url, headers=headers, timeout=min(10, timeout_sec))
+                    if sr.ok:
+                        js = sr.json()
+                        st = js.get("status")
+                        if debug:
+                            elapsed = (time.time() - (started_at or 0.0)) if started_at else 0.0
+                            print(f"[FAL POLL] item={item_idx} attempt={attempt} req={req_id} status={st} elapsed={elapsed:.1f}s")
+                        if st == "COMPLETED":
+                            completed = True
+                            break
+                        if st == "ERROR":
+                            msg = js.get("error") or "Unknown FAL error"
+                            payload = js.get("payload")
+                            if payload:
+                                raise RuntimeError(f"FAL status ERROR: {msg} | details: {payload}")
+                            raise RuntimeError(f"FAL status ERROR: {msg}")
+                except Exception as e:
+                    if debug:
+                        print(f"[FAL POLL] item={item_idx} attempt={attempt} req={req_id} status_check_error: {e}")
                 time.sleep(0.6)
             
             if not completed:
-                raise RuntimeError(f"FAL request timed out after {timeout}s")
+                raise RuntimeError(f"FAL request {req_id} timed out after {timeout_sec}s")
             
             # Fetch result
-            rr = requests.get(resp_url, headers=headers, timeout=15)
+            rr = requests.get(resp_url, headers=headers, timeout=min(15, timeout_sec))
             if not rr.ok:
+                # Attempt to detect content policy violation from JSON body
+                try:
+                    js = rr.json()
+                    if self._is_content_policy_violation(js):
+                        raise RuntimeError(f"FAL content_policy_violation: {js}")
+                except Exception:
+                    pass
                 raise RuntimeError(f"FAL result fetch error {rr.status_code}: {rr.text}")
             
             result = rr.json().get("response", rr.json())
         
-        # Validate result
+        # Validate + NSFW + image decoding via ResultProcessor
         if not isinstance(result, dict):
             self._raise("FAL: unexpected response type (expected dict).")
         
@@ -198,26 +271,89 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
                 err_msg = result["error"].get("message") or result["error"].get("detail")
             self._raise(f"FAL: no images returned{f' ({err_msg})' if err_msg else ''}.")
         
-        # NSFW detection via official field
         has_nsfw = result.get("has_nsfw_concepts")
         if isinstance(has_nsfw, list) and any(bool(x) for x in has_nsfw):
             self._raise("FAL: NSFW content detected by safety system (has_nsfw_concepts).")
         
-        # Process images using ResultProcessor
-        processed_result = ResultProcessor.process_image_result(result)
+        processed = ResultProcessor.process_image_result(result)  # -> (IMAGE,) or similar
+        if not processed or not isinstance(processed[0], torch.Tensor):
+            self._raise("FAL: internal error — processed image is not a tensor.")
         
-        # Check for black/empty image(s)
-        if processed_result and len(processed_result) > 0:
-            img_tensor = processed_result[0]
-            if not isinstance(img_tensor, torch.Tensor):
-                self._raise("FAL: internal error — processed image is not a tensor.")
-            if torch.all(img_tensor == 0) or (img_tensor.mean() < 1e-6):
-                self._raise("FAL: received an all-black image (likely filtered/failed).")
+        img_tensor = processed[0]
+        if img_tensor.ndim == 3:
+            img_tensor = img_tensor.unsqueeze(0)
+        # sanity for black/empty
+        if torch.all(img_tensor == 0) or (img_tensor.mean() < 1e-6):
+            self._raise("FAL: received an all-black image (likely filtered/failed).")
         
-        return processed_result[0] if processed_result else None
+        return img_tensor
+
+    # -------- per-item worker with retry logic --------
+    def _run_one_with_retries(
+        self,
+        item_index: int,
+        prompt_text: str,
+        seed_base: int,
+        output_format: str,
+        sync_mode: bool,
+        safety_tolerance: str,
+        aspect_ratio: str,
+        enable_safety_checker: bool,
+        raw: bool,
+        retries: int,
+        timeout_sec: int,
+        debug: bool,
+    ):
+        """
+        Returns: (success: bool, image_tensor or None, last_error_message or '')
+        Retries only this item up to `retries` times (total attempts = retries+1).
+        Stops retrying immediately on content_policy_violation.
+        """
+        seed_for_item = seed_base if seed_base == -1 else ((seed_base + item_index) % 4294967296)
+        last_err = ""
+        for attempt in range(1, int(retries) + 2):
+            t0 = time.time()
+            try:
+                if debug:
+                    print(f"[FAL ITEM] item={item_index} attempt={attempt}/{retries+1} seed={seed_for_item} ar={aspect_ratio} tol={safety_tolerance}")
+                req_info = self._fal_submit_only(
+                    prompt_text,
+                    seed_for_item,
+                    output_format,
+                    sync_mode,
+                    safety_tolerance,
+                    aspect_ratio,
+                    enable_safety_checker,
+                    raw,
+                    timeout_sec=timeout_sec,
+                    debug=debug,
+                )
+                img_tensor = self._fal_poll_and_fetch(
+                    req_info,
+                    timeout_sec=timeout_sec,
+                    debug=debug,
+                    item_idx=item_index,
+                    attempt=attempt,
+                    started_at=t0,
+                )
+                if debug:
+                    print(f"[FAL ITEM OK] item={item_index} attempt={attempt} dt={time.time()-t0:.2f}s")
+                return True, img_tensor, ""
+            except Exception as e:
+                err_str = str(e)
+                last_err = err_str
+                print(f"[FAL ITEM ERROR] item={item_index} attempt={attempt} -> {err_str}")
+                # Do not retry prohibited-content errors
+                if self._is_content_policy_violation(err_str):
+                    if debug:
+                        print(f"[FAL ITEM INFO] item={item_index} content_policy_violation detected — stopping retries.")
+                    break
+                # otherwise, continue to next attempt
+        return False, None, last_err
     
     def generate_image(self, prompt, seed, num_images, output_format,
                       sync_mode, safety_tolerance, aspect_ratio,
+                      retries=2, timeout_sec=120, debug_log=False,
                       delimiter="[*]",
                       enable_safety_checker=True, raw=False):
         
@@ -231,7 +367,7 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
             try:
                 base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
             except re.error:
-                print(f"[PVL WARNING] Invalid regex pattern '{delimiter}', using literal split.")
+                print(f"[PVL Flux Pro1.1 WARNING] Invalid regex pattern '{delimiter}', using literal split.")
                 base_prompts = [p.strip() for p in prompt.split(delimiter) if str(p).strip()]
             
             if not base_prompts:
@@ -239,106 +375,99 @@ class PVL_fal_FluxPro_v1_1_Ultra_API:
             
             # Map prompts to num_images calls
             call_prompts = self._build_call_prompts(base_prompts, num_images)
-            print(f"[PVL INFO] Processing {len(call_prompts)} prompts")
-            
-            # Single call: process directly (less overhead)
-            if len(call_prompts) == 1:
-                req_info = self._fal_submit_only(
-                    call_prompts[0], seed, output_format, sync_mode,
-                    safety_tolerance, aspect_ratio, enable_safety_checker, raw
+            N = len(call_prompts)
+            print(f"[PVL Flux Pro1.1 INFO] Processing {N} prompt(s) with retries={retries}, timeout={timeout_sec}s")
+
+            # Single call: use per-item retry worker
+            if N == 1:
+                ok, img_tensor, last_err = self._run_one_with_retries(
+                    item_index=0,
+                    prompt_text=call_prompts[0],
+                    seed_base=seed,
+                    output_format=output_format,
+                    sync_mode=sync_mode,
+                    safety_tolerance=safety_tolerance,
+                    aspect_ratio=aspect_ratio,
+                    enable_safety_checker=enable_safety_checker,
+                    raw=raw,
+                    retries=retries,
+                    timeout_sec=timeout_sec,
+                    debug=debug_log,
                 )
-                result = self._fal_poll_and_fetch(req_info)
-                
-                if result.ndim == 3:
-                    result = result.unsqueeze(0)
-                
-                _t1 = time.time()
-                print(f"[PVL INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
-                return (result,)
+                if ok and torch.is_tensor(img_tensor):
+                    _t1 = time.time()
+                    print(f"[PVL Flux Pro1.1 INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
+                    return (img_tensor,)
+                raise RuntimeError(last_err or "All attempts failed for single request")
             
-            # Multiple calls: TRUE PARALLEL execution with seed increment
-            print(f"[PVL INFO] Submitting {len(call_prompts)} requests in parallel...")
-            
-            # PHASE 1: Submit all requests in parallel
-            submit_results = []
-            max_workers = min(len(call_prompts), 6)
-            
+            # Multiple calls: TRUE PARALLEL with per-item retries
+            print(f"[PVL Flux Pro1.1 INFO] Submitting {N} requests in parallel...")
+            results_map: dict[int, torch.Tensor] = {}
+            errors_map: dict[int, str] = {}
+            max_workers = min(N, 6)
+
+            def worker(i: int):
+                return i, *self._run_one_with_retries(
+                    item_index=i,
+                    prompt_text=call_prompts[i],
+                    seed_base=seed,
+                    output_format=output_format,
+                    sync_mode=sync_mode,
+                    safety_tolerance=safety_tolerance,
+                    aspect_ratio=aspect_ratio,
+                    enable_safety_checker=enable_safety_checker,
+                    raw=raw,
+                    retries=retries,
+                    timeout_sec=timeout_sec,
+                    debug=debug_log,
+                )
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                submit_futs = {
-                    executor.submit(
-                        self._fal_submit_only,
-                        call_prompts[i],
-                        seed if seed == -1 else (seed + i) % 4294967296,  # Increment seed with overflow protection
-                        output_format, sync_mode,
-                        safety_tolerance, aspect_ratio, enable_safety_checker, raw
-                    ): i
-                    for i in range(len(call_prompts))
-                }
-                
-                for fut in as_completed(submit_futs):
-                    idx = submit_futs[fut]
-                    try:
-                        req_info = fut.result()
-                        submit_results.append((idx, req_info))
-                    except Exception as e:
-                        print(f"[PVL ERROR] Submit failed for prompt {idx}: {e}")
+                futs = [executor.submit(worker, i) for i in range(N)]
+                for fut in as_completed(futs):
+                    i, ok, img_tensor, last_err = fut.result()
+                    if ok and torch.is_tensor(img_tensor):
+                        results_map[i] = img_tensor
+                    else:
+                        errors_map[i] = last_err or "Unknown error"
             
-            if not submit_results:
-                raise RuntimeError("All FAL submission requests failed")
+            if not results_map:
+                # All failed
+                sample_err = next(iter(errors_map.values()), "All FAL requests failed")
+                raise RuntimeError(sample_err)
             
-            print(f"[PVL INFO] {len(submit_results)} requests submitted. Polling for results...")
-            
-            # PHASE 2: Poll all requests in parallel
-            results = {}
-            failed_count = 0
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                poll_futs = {
-                    executor.submit(self._fal_poll_and_fetch, req_info): idx
-                    for idx, req_info in submit_results
-                }
-                
-                for fut in as_completed(poll_futs):
-                    idx = poll_futs[fut]
-                    try:
-                        result = fut.result()
-                        if result is not None:
-                            results[idx] = result
-                    except Exception as e:
-                        failed_count += 1
-                        print(f"[PVL ERROR] Poll failed for prompt {idx}: {e}")
-            
-            if not results:
-                raise RuntimeError(f"All FAL requests failed during polling ({failed_count} failures)")
-            
-            if failed_count > 0:
-                print(f"[PVL WARNING] {failed_count}/{len(call_prompts)} requests failed, continuing with {len(results)} successful results")
-            
-            # Combine all image tensors in order
-            all_images = []
-            for i in range(len(call_prompts)):
-                if i in results:
-                    img_tensor = results[i]
-                    
-                    if torch.is_tensor(img_tensor):
-                        # Handle both 3D (H,W,C) and 4D (B,H,W,C) tensors
-                        if img_tensor.ndim == 3:
-                            img_tensor = img_tensor.unsqueeze(0)
-                        all_images.append(img_tensor)
-            
-            if not all_images:
-                raise RuntimeError("No images were generated from API calls")
-            
-            # Stack all images into single batch
-            final_tensor = torch.cat(all_images, dim=0)
+            # Combine all image tensors in order, normalizing size if needed
+            ordered = [results_map[i] for i in sorted(results_map.keys())]
+            try:
+                final_tensor = torch.cat(ordered, dim=0)
+            except RuntimeError:
+                # shape mismatch; normalize to first
+                first = ordered[0]
+                H, W = int(first.shape[1]), int(first.shape[2])
+                fixed = []
+                for t in ordered:
+                    if t.shape[1] == H and t.shape[2] == W:
+                        fixed.append(t)
+                    else:
+                        pil = ImageUtils.tensor_to_pil(t)
+                        rp = pil.resize((W, H))
+                        fixed.append(ImageUtils.pil_to_tensor(rp))
+                final_tensor = torch.cat(fixed, dim=0)
             
             _t1 = time.time()
-            print(f"[PVL INFO] Successfully generated {final_tensor.shape[0]} images in {(_t1 - _t0):.2f}s")
+            print(f"[PVL Flux Pro1.1 INFO] Successfully generated {final_tensor.shape[0]}/{N} images in {(_t1 - _t0):.2f}s")
+            
+            # Report partial failures without raising
+            failed_idxs = sorted(set(range(N)) - set(results_map.keys()))
+            if failed_idxs:
+                for i in failed_idxs:
+                    print(f"[PVL Flux Pro1.1 ERROR] Item {i+1} failed after {retries+1} attempt(s): {errors_map.get(i,'Unknown error')}")
+                print(f"[PVL Flux Pro1.1 WARNING] Returning only {final_tensor.shape[0]}/{N} successful results.")
             
             # Print seed info if seed was manually set
             if seed != -1:
-                seed_list = [seed + i for i in range(len(all_images))]
-                print(f"[PVL INFO] Seeds used: {seed_list}")
+                seed_list = [(seed + i) % 4294967296 for i in range(N)]
+                print(f"[PVL Flux Pro1.1 INFO] Seeds used: {seed_list}")
             
             return (final_tensor,)
             
