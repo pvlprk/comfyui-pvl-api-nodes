@@ -28,6 +28,7 @@ from .pvl_fal_seedream4_edit import PVL_fal_SeeDream4_API
 from .pvl_fal_qwen_txt2img import PVL_fal_QwenImage_API
 from .pvl_fal_flux_pulid import PVL_fal_FluxPulid
 from .pvl_google_nano_banana_multi_img import PVL_Google_NanoBanana_Multi_API
+from .pvl_google_nano_banana_pro_multi_img import PVL_Google_NanoBanana_PRO_Multi_API
 from .pvl_gemini_api import PVL_Gemini_API
 from .pvl_gemini_api_multi import PVL_Gemini_API_Multi
 from .pvl_txt import PVL_Txt
@@ -56,6 +57,10 @@ from .pvl_switch import PVL_Switch
 from .pvl_string_concat_x3 import PVL_StringConcatX3
 from .pvl_string_concat_x8 import PVL_StringConcatX8
 from .pvl_padding import PVL_Padding
+from .pvl_fal_segment import PVL_fal_EvfSam_API
+from .pvl_fal_segment_x5 import PVL_fal_EvfSam_X5_API
+from .pvl_fal_seg_florence2 import PVL_Seg_Florence2_API
+from .pvl_gemini_segmentation import PVL_GeminiSegmentation
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -88,6 +93,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_QwenImage_API": PVL_fal_QwenImage_API,
     "PVL_fal_FluxPulid": PVL_fal_FluxPulid,
     "PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API,
+    "PVL_Google_NanoBanana_PRO_Multi_API": PVL_Google_NanoBanana_PRO_Multi_API,
     "PVL_Gemini_API": PVL_Gemini_API,
     "PVL_Gemini_API_Multi": PVL_Gemini_API_Multi,
     "PVL_Txt": PVL_Txt,
@@ -116,6 +122,10 @@ NODE_CLASS_MAPPINGS = {
     "PVL_StringConcatX3": PVL_StringConcatX3,
     "PVL_StringConcatX8": PVL_StringConcatX8,
     "PVL_Padding": PVL_Padding,
+    "PVL_fal_EvfSam_API": PVL_fal_EvfSam_API,
+    "PVL_fal_EvfSam_X5_API": PVL_fal_EvfSam_X5_API,
+    "PVL_Seg_Florence2_API": PVL_Seg_Florence2_API,
+    "PVL_GeminiSegmentation": PVL_GeminiSegmentation,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -148,6 +158,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_QwenImage_API": "PVL QwenImage txt2img (fal.ai)",
     "PVL_fal_FluxPulid": "PVL Flux PuLID (fal.ai)",
     "PVL_Google_NanoBanana_Multi_API": "PVL Google NanoBanana API Multi",
+    "PVL_Google_NanoBanana_PRO_Multi_API": "PVL Google NanoBanana PRO Multi API",
     "PVL_Gemini_API": "PVL Gemini Api",
     "PVL_Gemini_API_Multi": "PVL Gemini Api Multi",
     "PVL_Txt": "PVL Txt",
@@ -176,4 +187,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
     "PVL_Padding": "PVL Padding",
+    "PVL_fal_EvfSam_API": "PVL Segment (fal.ai)",
+    "PVL_fal_EvfSam_X5_API": "PVL Segment X5 (fal.ai)",
+    "PVL_Seg_Florence2_API": "PVL Seg Florence2 (fal.ai)",
+    "PVL_GeminiSegmentation": "PVL Gemini 2.5 Segmentation",
 }
