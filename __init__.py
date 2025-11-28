@@ -61,6 +61,7 @@ from .pvl_fal_segment import PVL_fal_EvfSam_API
 from .pvl_fal_segment_x5 import PVL_fal_EvfSam_X5_API
 from .pvl_fal_seg_florence2 import PVL_Seg_Florence2_API
 from .pvl_gemini_segmentation import PVL_GeminiSegmentation
+from .pvl_fal_flux2_dev import PVL_fal_Flux2_Dev_API
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -126,6 +127,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_EvfSam_X5_API": PVL_fal_EvfSam_X5_API,
     "PVL_Seg_Florence2_API": PVL_Seg_Florence2_API,
     "PVL_GeminiSegmentation": PVL_GeminiSegmentation,
+    "PVL_fal_Flux2_Dev_API": PVL_fal_Flux2_Dev_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -191,4 +193,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_EvfSam_X5_API": "PVL Segment X5 (fal.ai)",
     "PVL_Seg_Florence2_API": "PVL Seg Florence2 (fal.ai)",
     "PVL_GeminiSegmentation": "PVL Gemini 2.5 Segmentation",
+    "PVL_fal_Flux2_Dev_API": "PVL Flux.2 Dev (fal.ai)",
 }
