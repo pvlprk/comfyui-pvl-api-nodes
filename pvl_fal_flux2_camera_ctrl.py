@@ -1,4 +1,3 @@
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -8,64 +7,94 @@ import torch
 from .fal_utils import FalConfig, ImageUtils, ResultProcessor, ApiHandler
 
 
-class PVL_fal_Flux2_Dev_API:
+class PVL_fal_Flux2_Camera_Ctrl_API:
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True}),
-                # Image size: selector + custom width/height
+                # Single required image input
+                "image": ("IMAGE",),
+
+                # Camera controls
+                "horizontal_angle": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -360.0,
+                    "max": 360.0,
+                    "step": 1.0
+                }),
+                "vertical_angle": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -90.0,
+                    "max": 90.0,
+                    "step": 1.0
+                }),
+                "zoom": ("FLOAT", {
+                    "default": 5.0,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 0.1
+                }),
+
+                # Image size: renamed presets + custom width/height
                 "image_size": (
                     [
-                        "1:1",   # square_hd
-                        "3:4",   # portrait_4_3
-                        "9:16",  # portrait_16_9
-                        "4:3",   # landscape_4_3
-                        "16:9",  # landscape_16_9
-                        "custom"
+                        "auto",    # omit image_size -> use input resolution
+                        "1:1",     # square_hd
+                        "3:4",     # portrait_4_3
+                        "9:16",    # portrait_16_9
+                        "4:3",     # landscape_4_3
+                        "16:9",    # landscape_16_9
+                        "custom",  # uses width/height below
                     ],
-                    {"default": "custom"},
+                    {"default": "auto"},
                 ),
                 "width": ("INT", {"default": 1024, "min": 512, "max": 2048}),
                 "height": ("INT", {"default": 1024, "min": 512, "max": 2048}),
-                "steps": ("INT", {"default": 28, "min": 1, "max": 100}),
-                "CFG": ("FLOAT", {"default": 2.5, "min": 1.0, "max": 20.0, "step": 0.1}),
+
+                # Guidance / steps / LoRA / acceleration
+                "guidance_scale": ("FLOAT", {
+                    "default": 2.5,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1
+                }),
+                "num_inference_steps": ("INT", {
+                    "default": 40,
+                    "min": 1,
+                    "max": 200,
+                }),
+                "acceleration": (
+                    ["none", "regular"],
+                    {"default": "regular"},
+                ),
+                "lora_scale": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.05
+                }),
+
+                # Seed / batch / safety / format
                 "seed": ("INT", {"default": -1, "min": -1, "max": 4294967295}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 8}),
-                "acceleration": (["none", "regular", "high"], {"default": "regular"}),
-                "enable_prompt_expansion": ("BOOLEAN", {"default": False}),
                 "enable_safety_checker": ("BOOLEAN", {"default": False}),
-                "output_format": (["jpg", "png", "webp"], {"default": "png"}),
-                "sync_mode": ("BOOLEAN", {"default": False}),
+                "output_format": (
+                    ["png", "jpg", "webp"],
+                    {"default": "png"},
+                ),
+
                 # Retry + timeout + debug controls
                 "retries": ("INT", {"default": 2, "min": 0, "max": 10}),
-                "timeout_sec": ("INT", {"default": 30, "min": 5, "max": 600, "step": 5}),
+                "timeout_sec": ("INT", {
+                    "default": 30,
+                    "min": 5,
+                    "max": 600,
+                    "step": 5
+                }),
                 "debug_log": ("BOOLEAN", {"default": False}),
             },
-            "optional": {
-                "delimiter": ("STRING", {
-                    "default": "[++]",
-                    "multiline": False,
-                    "placeholder": "Delimiter for splitting prompts (e.g., [*], \\n, |)"
-                }),
-                # LoRA inputs
-                "lora1_name": ("STRING", {"default": ""}),
-                "lora1_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
-                "lora2_name": ("STRING", {"default": ""}),
-                "lora2_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
-                "lora3_name": ("STRING", {"default": ""}),
-                "lora3_scale": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.1}),
-                # Up to 8 optional image inputs
-                "image_1": ("IMAGE",),
-                "image_2": ("IMAGE",),
-                "image_3": ("IMAGE",),
-                "image_4": ("IMAGE",),
-                "image_5": ("IMAGE",),
-                "image_6": ("IMAGE",),
-                "image_7": ("IMAGE",),
-                "image_8": ("IMAGE",),
-            },
+            "optional": {},
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -113,30 +142,6 @@ class PVL_fal_Flux2_Dev_API:
             pass
         return False
 
-    def _build_call_prompts(self, base_prompts, num_images, debug=False):
-        """
-        Maps prompts to calls according to the rule:
-        - If len(prompts) >= num_images → take first num_images
-        - If len(prompts) < num_images → reuse last prompt for remaining calls.
-        """
-        N = max(1, int(num_images))
-        if not base_prompts:
-            return []
-
-        if len(base_prompts) >= N:
-            call_prompts = base_prompts[:N]
-        else:
-            if debug:
-                print(f"[PVL Flux2 Dev Fal] Provided {len(base_prompts)} prompts but num_images={N}. "
-                      f"Reusing the last prompt for remaining calls.")
-            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
-
-        if debug:
-            for i, p in enumerate(call_prompts):
-                show = p if len(p) <= 160 else (p[:157] + "...")
-                print(f"[PVL Flux2 Dev Fal] Call {i + 1} prompt: {show}")
-        return call_prompts
-
     # ------------------------------------------------------------------
     # FAL Queue API - submit + poll
     # ------------------------------------------------------------------
@@ -144,20 +149,19 @@ class PVL_fal_Flux2_Dev_API:
     def _fal_submit_only(
         self,
         endpoint: str,
-        prompt_text: str,
+        image_urls,
+        horizontal_angle: float,
+        vertical_angle: float,
+        zoom: float,
         image_size,
-        width: int,
-        height: int,
-        steps: int,
-        CFG: float,
-        seed: int,
+        guidance_scale: float,
+        num_inference_steps: int,
         acceleration: str,
-        enable_prompt_expansion: bool,
+        lora_scale: float,
+        seed: int,
         enable_safety_checker: bool,
         output_format: str,
         sync_mode: bool,
-        image_urls,
-        loras,
         timeout_sec: int = 120,
         debug: bool = False,
     ):
@@ -165,63 +169,52 @@ class PVL_fal_Flux2_Dev_API:
         Phase 1: Submit request to FAL and return request info immediately.
         Does NOT wait for completion.
         """
+        if not image_urls:
+            raise RuntimeError(
+                "flux-2-lora-gallery/multiple-angles: at least one input image is required."
+            )
+
         # Map UI "jpg" → API "jpeg"
-        fmt = "jpeg" if output_format == "jpg" else output_format
-
-        # Map UI image_size labels → FAL enums
-        size_map = {
-            "1:1": "square_hd",
-            "3:4": "portrait_4_3",
-            "9:16": "portrait_16_9",
-            "4:3": "landscape_4_3",
-            "16:9": "landscape_16_9",
-        }
-
-        if isinstance(image_size, dict):
-            img_size_payload = image_size
+        if output_format == "jpg":
+            fmt = "jpeg"
         else:
-            if image_size == "custom":
-                img_size_payload = {
-                    "width": int(width),
-                    "height": int(height),
-                }
-            else:
-                img_size_payload = size_map.get(image_size, image_size)
+            fmt = output_format  # "png" or "webp"
 
         arguments = {
-            "prompt": prompt_text,
-            "num_inference_steps": steps,
-            "guidance_scale": CFG,
-            "num_images": 1,  # each call generates 1 image
-            "image_size": img_size_payload,
+            "image_urls": image_urls,
+            "horizontal_angle": float(horizontal_angle),
+            "vertical_angle": float(vertical_angle),
+            "zoom": float(zoom),
+            "guidance_scale": float(guidance_scale),
+            "num_inference_steps": int(num_inference_steps),
             "acceleration": acceleration,
-            "enable_prompt_expansion": enable_prompt_expansion,
-            "enable_safety_checker": enable_safety_checker,
+            "lora_scale": float(lora_scale),
+            "enable_safety_checker": bool(enable_safety_checker),
             "output_format": fmt,
-            "sync_mode": sync_mode,
+            "sync_mode": bool(sync_mode),
         }
 
+        # image_size handling
+        if isinstance(image_size, dict):
+            arguments["image_size"] = image_size
+        else:
+            if image_size == "auto":
+                # omit image_size → FAL will use input resolution
+                pass
+            else:
+                arguments["image_size"] = image_size  # enum string
+
         if seed != -1:
-            arguments["seed"] = seed
-
-        # Image endpoints
-        if image_urls and endpoint in ("fal-ai/flux-2/edit", "fal-ai/flux-2/lora/edit"):
-            arguments["image_urls"] = image_urls[:3]
-
-        # LoRA endpoints
-        if loras and endpoint in ("fal-ai/flux-2/lora", "fal-ai/flux-2/lora/edit"):
-            arguments["loras"] = loras
+            arguments["seed"] = int(seed)
 
         if debug:
             print(
                 f"[FAL SUBMIT] endpoint={endpoint} "
-                f"images={len(image_urls) if image_urls else 0} "
-                f"loras={len(loras) if loras else 0} "
-                f"image_size={img_size_payload}"
+                f"images={len(image_urls)} "
+                f"img_size={arguments.get('image_size', 'auto (input resolution)')} "
+                f"h_angle={horizontal_angle} v_angle={vertical_angle} zoom={zoom}"
             )
 
-        # If ApiHandler gets extended in future, we can use it;
-        # otherwise we fall back to direct queue REST.
         if hasattr(ApiHandler, "submit_only"):
             try:
                 if "timeout" in ApiHandler.submit_only.__code__.co_varnames:
@@ -282,7 +275,6 @@ class PVL_fal_Flux2_Dev_API:
         Phase 2: Poll a single FAL request until complete and fetch the result.
         Returns image tensor (or tuple processed by ResultProcessor).
         """
-        # If ApiHandler grows polling support, we can use it.
         if hasattr(ApiHandler, "poll_and_get_result"):
             try:
                 if "timeout" in ApiHandler.poll_and_get_result.__code__.co_varnames:
@@ -360,20 +352,19 @@ class PVL_fal_Flux2_Dev_API:
         self,
         item_index: int,
         endpoint: str,
-        prompt_text: str,
+        image_urls,
+        horizontal_angle: float,
+        vertical_angle: float,
+        zoom: float,
         image_size,
-        width: int,
-        height: int,
-        steps: int,
-        CFG: float,
-        seed_base: int,
+        guidance_scale: float,
+        num_inference_steps: int,
         acceleration: str,
-        enable_prompt_expansion: bool,
+        lora_scale: float,
+        seed_base: int,
         enable_safety_checker: bool,
         output_format: str,
         sync_mode: bool,
-        image_urls,
-        loras,
         retries: int,
         timeout_sec: int,
         debug: bool,
@@ -394,30 +385,28 @@ class PVL_fal_Flux2_Dev_API:
                         f"[FAL ITEM] endpoint={endpoint} item={item_index} "
                         f"attempt={attempt}/{total_attempts} "
                         f"seed={seed_for_item} "
-                        f"images={len(image_urls) if image_urls else 0} "
-                        f"loras={len(loras) if loras else 0}"
+                        f"images={len(image_urls)}"
                     )
                 req_info = self._fal_submit_only(
-                    endpoint,
-                    prompt_text,
-                    image_size,
-                    width,
-                    height,
-                    steps,
-                    CFG,
-                    seed_for_item,
-                    acceleration,
-                    enable_prompt_expansion,
-                    enable_safety_checker,
-                    output_format,
-                    sync_mode,
-                    image_urls,
-                    loras,
+                    endpoint=endpoint,
+                    image_urls=image_urls,
+                    horizontal_angle=horizontal_angle,
+                    vertical_angle=vertical_angle,
+                    zoom=zoom,
+                    image_size=image_size,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
+                    acceleration=acceleration,
+                    lora_scale=lora_scale,
+                    seed=seed_for_item,
+                    enable_safety_checker=enable_safety_checker,
+                    output_format=output_format,
+                    sync_mode=sync_mode,
                     timeout_sec=timeout_sec,
                     debug=debug,
                 )
                 result = self._fal_poll_and_fetch(
-                    req_info,
+                    request_info=req_info,
                     timeout_sec=timeout_sec,
                     debug=debug,
                     item_idx=item_index,
@@ -455,55 +444,26 @@ class PVL_fal_Flux2_Dev_API:
         return False, None, last_err
 
     # ------------------------------------------------------------------
-    # LoRA + image collection
+    # Image collection
     # ------------------------------------------------------------------
 
-    def _collect_loras(self, lora1_name, lora1_scale, lora2_name, lora2_scale, lora3_name, lora3_scale):
-        loras = []
-        if str(lora1_name).strip():
-            loras.append({"path": str(lora1_name).strip(), "scale": float(lora1_scale)})
-        if str(lora2_name).strip():
-            loras.append({"path": str(lora2_name).strip(), "scale": float(lora2_scale)})
-        if str(lora3_name).strip():
-            loras.append({"path": str(lora3_name).strip(), "scale": float(lora3_scale)})
-        return loras
-
-    def _collect_image_urls(self, images, debug=False):
+    def _collect_image_urls(self, image, debug=False):
         """
-        Convert connected image tensors to Base64 PNG data URIs for FAL.
-        We do NOT log the data URI itself, only the count.
+        Convert a single image tensor to a Base64 PNG data URI for FAL.
+        We do NOT log the data URI itself, only the fact it's present.
         """
-        urls = []
-        for idx, img in enumerate(images):
-            if img is None:
-                continue
-            if not isinstance(img, torch.Tensor):
-                continue
-            try:
-                data_uri = ImageUtils.image_to_data_uri(img)
-                urls.append(data_uri)
-                if debug:
-                    print(f"[FAL IMAGE] found image input at slot {idx + 1}")
-            except Exception as e:
-                print(f"[FAL IMAGE ENCODE ERROR] image_{idx + 1}: {e}")
+        if image is None:
+            raise RuntimeError("No image provided to camera control node.")
+        if not isinstance(image, torch.Tensor):
+            raise RuntimeError("Camera control image must be a torch.Tensor.")
 
-        if debug:
-            print(f"[FAL IMAGE] total encoded images for request: {len(urls)}")
-
-        if len(urls) > 3:
+        try:
+            data_uri = ImageUtils.image_to_data_uri(image)
             if debug:
-                print(f"[FAL IMAGE INFO] {len(urls)} images provided, truncating to first 3.")
-            urls = urls[:3]
-        return urls
-
-    def _select_endpoint(self, has_image: bool, has_lora: bool):
-        if not has_image and not has_lora:
-            return "fal-ai/flux-2"
-        if has_image and not has_lora:
-            return "fal-ai/flux-2/edit"
-        if not has_image and has_lora:
-            return "fal-ai/flux-2/lora"
-        return "fal-ai/flux-2/lora/edit"
+                print("[FAL IMAGE] encoded 1 image for request")
+            return [data_uri]
+        except Exception as e:
+            raise RuntimeError(f"FAL IMAGE ENCODE ERROR (camera control): {e}")
 
     # ------------------------------------------------------------------
     # Main
@@ -511,106 +471,79 @@ class PVL_fal_Flux2_Dev_API:
 
     def generate_image(
         self,
-        prompt,
+        image,
+        horizontal_angle,
+        vertical_angle,
+        zoom,
         image_size,
         width,
         height,
-        steps,
-        CFG,
+        guidance_scale,
+        num_inference_steps,
+        acceleration,
+        lora_scale,
         seed,
         num_images,
-        acceleration,
-        enable_prompt_expansion,
         enable_safety_checker,
         output_format,
-        sync_mode,
         retries=2,
         timeout_sec=30,
         debug_log=False,
-        delimiter="[++]",
-        lora1_name="",
-        lora1_scale=1.0,
-        lora2_name="",
-        lora2_scale=1.0,
-        lora3_name="",
-        lora3_scale=1.0,
-        image_1=None,
-        image_2=None,
-        image_3=None,
-        image_4=None,
-        image_5=None,
-        image_6=None,
-        image_7=None,
-        image_8=None,
     ):
         t0 = time.time()
+        sync_mode = False  # always store outputs in FAL history
 
         try:
-            # Split prompts with regex delimiter
-            try:
-                base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
-            except re.error:
-                print(f"[PVL Flux2 Dev Fal WARNING] Invalid regex pattern '{delimiter}', using literal split.")
-                base_prompts = [p.strip() for p in prompt.split(delimiter) if str(p).strip()]
+            # Encode required single image
+            image_urls = self._collect_image_urls(image, debug=debug_log)
 
-            if not base_prompts:
-                raise RuntimeError("No valid prompts provided.")
-
-            # Map prompts to calls
-            call_prompts = self._build_call_prompts(base_prompts, num_images, debug=debug_log)
-            N = len(call_prompts)
+            endpoint = "fal-ai/flux-2-lora-gallery/multiple-angles"
             print(
-                f"[PVL Flux2 Dev Fal INFO] Processing {N} prompt(s) with retries={retries}, "
-                f"timeout={timeout_sec}s, num_images={num_images}"
+                f"[PVL Flux2 LoraGallery MA Fal INFO] Selected endpoint='{endpoint}' "
+                f"(num_image_uris={len(image_urls)})"
             )
 
-            # LoRAs: determine presence from inputs (names), then build payload list.
-            has_lora_input = any(str(x).strip() for x in (lora1_name, lora2_name, lora3_name))
-            loras = self._collect_loras(
-                lora1_name,
-                lora1_scale,
-                lora2_name,
-                lora2_scale,
-                lora3_name,
-                lora3_scale,
-            )
+            # Map UI image_size labels to FAL enums
+            size_map = {
+                "1:1": "square_hd",
+                "3:4": "portrait_4_3",
+                "9:16": "portrait_16_9",
+                "4:3": "landscape_4_3",
+                "16:9": "landscape_16_9",
+            }
 
-            # Images: presence is based on any non-None tensor, then we encode to data URIs.
-            images = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8]
-            has_image_input = any(img is not None for img in images)
-            image_urls = self._collect_image_urls(images, debug=debug_log)
+            # Prepare image_size payload used for all items
+            if image_size == "custom":
+                image_size_payload = {"width": int(width), "height": int(height)}
+            elif image_size == "auto":
+                image_size_payload = "auto"  # sentinel → handled in _fal_submit_only
+            else:
+                image_size_payload = size_map.get(image_size, image_size)
 
-            endpoint = self._select_endpoint(has_image=has_image_input, has_lora=has_lora_input)
+            N = max(1, int(num_images))
             print(
-                f"[PVL Flux2 Dev Fal INFO] Selected endpoint='{endpoint}' "
-                f"(has_image_input={has_image_input}, has_lora_input={has_lora_input}, "
-                f"num_image_uris={len(image_urls)}, num_loras={len(loras)})"
+                f"[PVL Flux2 LoraGallery MA Fal INFO] Processing {N} image(s) "
+                f"with retries={retries}, timeout={timeout_sec}s"
             )
-
-            if endpoint in ("fal-ai/flux-2/edit", "fal-ai/flux-2/lora/edit") and not image_urls:
-                raise RuntimeError(
-                    "Edit endpoint selected but no valid image data URIs were produced from the inputs."
-                )
 
             # Single-call path
             if N == 1:
                 ok, img_tensor, last_err = self._run_one_with_retries(
                     item_index=0,
                     endpoint=endpoint,
-                    prompt_text=call_prompts[0],
-                    image_size=image_size,
-                    width=width,
-                    height=height,
-                    steps=steps,
-                    CFG=CFG,
-                    seed_base=seed,
+                    image_urls=image_urls,
+                    horizontal_angle=horizontal_angle,
+                    vertical_angle=vertical_angle,
+                    zoom=zoom,
+                    image_size=image_size_payload,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
                     acceleration=acceleration,
-                    enable_prompt_expansion=enable_prompt_expansion,
+                    lora_scale=lora_scale,
+                    seed_base=seed,
                     enable_safety_checker=enable_safety_checker,
                     output_format=output_format,
                     sync_mode=sync_mode,
-                    image_urls=image_urls,
-                    loras=loras,
                     retries=retries,
                     timeout_sec=timeout_sec,
                     debug=debug_log,
@@ -618,7 +551,7 @@ class PVL_fal_Flux2_Dev_API:
                 if ok and torch.is_tensor(img_tensor):
                     t1 = time.time()
                     print(
-                        f"[PVL Flux2 Dev Fal INFO] Successfully generated 1 image "
+                        f"[PVL Flux2 LoraGallery MA Fal INFO] Successfully generated 1 image "
                         f"in {t1 - t0:.2f}s using endpoint='{endpoint}'"
                     )
                     return (img_tensor,)
@@ -626,7 +559,7 @@ class PVL_fal_Flux2_Dev_API:
 
             # Multi-call parallel path
             print(
-                f"[PVL Flux2 Dev Fal INFO] Submitting {N} requests in parallel "
+                f"[PVL Flux2 LoraGallery MA Fal INFO] Submitting {N} requests in parallel "
                 f"using endpoint='{endpoint}'..."
             )
 
@@ -635,24 +568,22 @@ class PVL_fal_Flux2_Dev_API:
             max_workers = min(N, 6)
 
             def worker(i):
-                ptxt = call_prompts[i]
                 return i, *self._run_one_with_retries(
                     item_index=i,
                     endpoint=endpoint,
-                    prompt_text=ptxt,
-                    image_size=image_size,
-                    width=width,
-                    height=height,
-                    steps=steps,
-                    CFG=CFG,
-                    seed_base=seed,
+                    image_urls=image_urls,
+                    horizontal_angle=horizontal_angle,
+                    vertical_angle=vertical_angle,
+                    zoom=zoom,
+                    image_size=image_size_payload,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
                     acceleration=acceleration,
-                    enable_prompt_expansion=enable_prompt_expansion,
+                    lora_scale=lora_scale,
+                    seed_base=seed,
                     enable_safety_checker=enable_safety_checker,
                     output_format=output_format,
                     sync_mode=sync_mode,
-                    image_urls=image_urls,
-                    loras=loras,
                     retries=retries,
                     timeout_sec=timeout_sec,
                     debug=debug_log,
@@ -685,7 +616,7 @@ class PVL_fal_Flux2_Dev_API:
 
             t1 = time.time()
             print(
-                f"[PVL Flux2 Dev Fal INFO] Successfully generated "
+                f"[PVL Flux2 LoraGallery MA Fal INFO] Successfully generated "
                 f"{final_tensor.shape[0]}/{N} images in {t1 - t0:.2f}s "
                 f"using endpoint='{endpoint}'"
             )
@@ -694,29 +625,29 @@ class PVL_fal_Flux2_Dev_API:
             if failed_idxs:
                 for i in failed_idxs:
                     print(
-                        f"[PVL Flux2 Dev Fal ERROR] Item {i + 1} failed after "
+                        f"[PVL Flux2 LoraGallery MA Fal ERROR] Item {i + 1} failed after "
                         f"{retries + 1} attempt(s): {errors_map.get(i, 'Unknown error')}"
                     )
                 print(
-                    f"[PVL Flux2 Dev Fal WARNING] Returning only "
+                    f"[PVL Flux2 LoraGallery MA Fal WARNING] Returning only "
                     f"{final_tensor.shape[0]}/{N} successful results."
                 )
 
             if seed != -1:
                 seed_list = [(seed + i) % 4294967296 for i in range(N)]
-                print(f"[PVL Flux2 Dev Fal INFO] Seeds used: {seed_list}")
+                print(f"[PVL Flux2 LoraGallery MA Fal INFO] Seeds used: {seed_list}")
 
             return (final_tensor,)
 
         except Exception as e:
-            print(f"Error generating image with FLUX.2: {str(e)}")
-            return self._handle_error("FLUX.2", e)
+            print(f"Error generating image with FLUX.2 Multiple Angles: {str(e)}")
+            return self._handle_error("FLUX.2 Multiple Angles", e)
 
 
 NODE_CLASS_MAPPINGS = {
-    "PVL_fal_Flux2_Dev_API": PVL_fal_Flux2_Dev_API,
+    "PVL_fal_Flux2_Camera_Ctrl_API": PVL_fal_Flux2_Camera_Ctrl_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PVL_fal_Flux2_Dev_API": "PVL Flux.2 Dev (fal.ai)",
+    "PVL_fal_Flux2_Camera_Ctrl_API": "PVL Flux.2 Camera Control (fal.ai)",
 }

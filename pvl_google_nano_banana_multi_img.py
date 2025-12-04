@@ -246,7 +246,7 @@ class PVL_Google_NanoBanana_Multi_API:
                 "image_6": ("IMAGE",),
                 "image_7": ("IMAGE",),
                 "image_8": ("IMAGE",),
-                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2"}),
+                "aspect_ratio": ("STRING", {"default": "1:1", "placeholder": "e.g. 16:9, 9:16, 3:2 or auto"}),
                 "endpoint_override": ("STRING", {"default": ""}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Leave empty to use GEMINI_API_KEY"}),
                 "request_id": ("STRING", {"default": ""}),
@@ -677,10 +677,18 @@ class PVL_Google_NanoBanana_Multi_API:
     ):
         t0 = time.time()
 
-        # Only use aspect_ratio if it's strictly x:y; otherwise omit it entirely from requests
-        aspect_ratio_opt = self._clean_aspect_ratio(aspect_ratio)
-        if aspect_ratio and not aspect_ratio_opt:
-            print(f"[PVL NANO MULTI WARNING] Invalid or unsupported aspect_ratio format '{aspect_ratio}'. Omitting from API requests.")
+        # Aspect ratio handling:
+        # - "auto" (any case/whitespace) -> omit from Google + FAL (aspect_ratio_opt = None, no warning)
+        # - valid "x:y" string          -> normalized and used
+        # - other invalid strings       -> omitted, with warning
+        aspect_ratio_opt = None
+        if aspect_ratio and aspect_ratio.strip().lower() != "auto":
+            aspect_ratio_opt = self._clean_aspect_ratio(aspect_ratio)
+            if aspect_ratio and not aspect_ratio_opt:
+                print(
+                    f"[PVL NANO MULTI WARNING] Invalid or unsupported aspect_ratio format '{aspect_ratio}'. "
+                    "Omitting from API requests."
+                )
 
         # Split prompts
         try:
@@ -779,7 +787,10 @@ class PVL_Google_NanoBanana_Multi_API:
         client = self._make_client(key, endpoint_override)
         cfg = self._build_config(want_text, aspect_ratio_opt)
         if debug_log:
-            print(f"[PVL NANO MULTI Debug] Google pass — {N} calls in parallel, aspect_ratio={'(omitted)' if not aspect_ratio_opt else aspect_ratio_opt}")
+            print(
+                f"[PVL NANO MULTI Debug] Google pass — {N} calls in parallel, "
+                f"aspect_ratio={'(omitted)' if not aspect_ratio_opt else aspect_ratio_opt}"
+            )
 
         # ROUND 1 (Google)
         g_succ1, g_texts1, g_errs1 = self._parallel_google_batch(

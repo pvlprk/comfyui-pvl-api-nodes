@@ -7,7 +7,6 @@ from .pvl_fal_flux_dev import PVL_fal_FluxDev_API
 from .pvl_fal_kontext_max_single import PVL_fal_KontextMaxSingle_API
 from .pvl_fal_kontext_dev_inpaint import PVL_fal_KontextDevInpaint_API
 from .pvl_fal_flux_general import PVL_fal_FluxGeneral_API
-from .pvl_switchTen import PVL_Switch_Huge
 from .pvl_fal_kontext_dev_lora import PVL_fal_KontextDevLora_API
 from .pvl_fal_kontext_pro import PVL_fal_KontextPro_API
 from .pvl_fal_flux_pro11_ultra import PVL_fal_FluxPro_v1_1_Ultra_API
@@ -30,7 +29,9 @@ from .pvl_fal_flux_pulid import PVL_fal_FluxPulid
 from .pvl_google_nano_banana_multi_img import PVL_Google_NanoBanana_Multi_API
 from .pvl_google_nano_banana_pro_multi_img import PVL_Google_NanoBanana_PRO_Multi_API
 from .pvl_gemini_api import PVL_Gemini_API
+from .pvl_gemini_with_fallback_api import PVL_Gemini_with_fallback_API
 from .pvl_gemini_api_multi import PVL_Gemini_API_Multi
+from .pvl_gemini_with_fallback_api_multi import PVL_Gemini_with_fallback_API_Multi
 from .pvl_txt import PVL_Txt
 from .pvl_boolean_logic import PVL_BooleanLogic
 from .pvl_any2string import PVL_Any2String
@@ -54,6 +55,10 @@ from .pvl_image_composite import PVL_ImageComposite
 from .pvl_qwen_img_edit_inpaint import PVL_Qwen_Img_Edit_Inpaint
 from .pvl_qwen_img_edit_plus import PVL_Qwen_Img_Edit_Plus
 from .pvl_switch import PVL_Switch
+from .pvl_switchTen import PVL_Switch_Huge
+from .pvl_switch_x5 import PVL_Switch_x5
+from .pvl_switch_x10 import PVL_Switch_x10
+from .pvl_switch_x15 import PVL_Switch_x15
 from .pvl_string_concat_x3 import PVL_StringConcatX3
 from .pvl_string_concat_x8 import PVL_StringConcatX8
 from .pvl_padding import PVL_Padding
@@ -62,6 +67,11 @@ from .pvl_fal_segment_x5 import PVL_fal_EvfSam_X5_API
 from .pvl_fal_seg_florence2 import PVL_Seg_Florence2_API
 from .pvl_gemini_segmentation import PVL_GeminiSegmentation
 from .pvl_fal_flux2_dev import PVL_fal_Flux2_Dev_API
+from .pvl_fal_flux2_pro import PVL_fal_Flux2_Pro_API
+from .pvl_fal_flux2_flex import PVL_fal_Flux2_Flex_API
+from .pvl_fal_flux2_camera_ctrl import PVL_fal_Flux2_Camera_Ctrl_API
+from .pvl_color_match import PVL_Color_Match
+from .pvl_get_image_size import PVL_Get_Image_Size
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -73,7 +83,6 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_KontextMaxSingle_API": PVL_fal_KontextMaxSingle_API,
     "PVL_fal_KontextDevInpaint_API": PVL_fal_KontextDevInpaint_API, 
     "PVL_fal_FluxGeneral_API": PVL_fal_FluxGeneral_API,
-    "PVL_Switch_Huge": PVL_Switch_Huge,
     "PVL_fal_KontextDevLora_API": PVL_fal_KontextDevLora_API,
     "PVL_fal_KontextPro_API": PVL_fal_KontextPro_API,
     "PVL_fal_FluxPro_v1_1_Ultra_API": PVL_fal_FluxPro_v1_1_Ultra_API,
@@ -96,7 +105,9 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Google_NanoBanana_Multi_API": PVL_Google_NanoBanana_Multi_API,
     "PVL_Google_NanoBanana_PRO_Multi_API": PVL_Google_NanoBanana_PRO_Multi_API,
     "PVL_Gemini_API": PVL_Gemini_API,
+    "PVL_Gemini_with_fallback_API": PVL_Gemini_with_fallback_API,
     "PVL_Gemini_API_Multi": PVL_Gemini_API_Multi,
+    "PVL_Gemini_with_fallback_API_Multi": PVL_Gemini_with_fallback_API_Multi,
     "PVL_Txt": PVL_Txt,
     "PVL_BooleanLogic": PVL_BooleanLogic,
     "PVL_Any2String": PVL_Any2String,
@@ -120,6 +131,10 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Qwen_Img_Edit_Inpaint": PVL_Qwen_Img_Edit_Inpaint,
     "PVL_Qwen_Img_Edit_Plus": PVL_Qwen_Img_Edit_Plus,
     "PVL_Switch": PVL_Switch,
+    "PVL_Switch_Huge": PVL_Switch_Huge,
+    "PVL_Switch_x5": PVL_Switch_x5,
+    "PVL_Switch_x10": PVL_Switch_x10,
+    "PVL_Switch_x15": PVL_Switch_x15,
     "PVL_StringConcatX3": PVL_StringConcatX3,
     "PVL_StringConcatX8": PVL_StringConcatX8,
     "PVL_Padding": PVL_Padding,
@@ -128,6 +143,11 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Seg_Florence2_API": PVL_Seg_Florence2_API,
     "PVL_GeminiSegmentation": PVL_GeminiSegmentation,
     "PVL_fal_Flux2_Dev_API": PVL_fal_Flux2_Dev_API,
+    "PVL_fal_Flux2_Pro_API": PVL_fal_Flux2_Pro_API,
+    "PVL_fal_Flux2_Flex_API": PVL_fal_Flux2_Flex_API,
+    "PVL_fal_Flux2_Camera_Ctrl_API": PVL_fal_Flux2_Camera_Ctrl_API,
+    "PVL_Color_Match": PVL_Color_Match,
+    "PVL_Get_Image_Size": PVL_Get_Image_Size,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -140,7 +160,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_KontextMaxSingle_API": "PVL Kontext Max Single (fal.ai)",
     "PVL_fal_KontextDevInpaint_API": "PVL Kontext Dev Inpaint (fal.ai)",
     "PVL_fal_FluxGeneral_API": "PVL FLUX General (fal.ai)",
-    "PVL_Switch_Huge": "PVL Switch Huge",
     "PVL_fal_KontextDevLora_API": "PVL Kontext Dev LoRA (fal.ai)",
     "PVL_fal_KontextPro_API": "PVL Kontext Pro (fal.ai)",
     "PVL_fal_FluxPro_v1_1_Ultra_API": "PVL FluxPro1.1 Ultra (fal.ai)",
@@ -162,7 +181,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Google_NanoBanana_Multi_API": "PVL Google NanoBanana API Multi",
     "PVL_Google_NanoBanana_PRO_Multi_API": "PVL Google NanoBanana PRO Multi API",
     "PVL_Gemini_API": "PVL Gemini Api",
+    "PVL_Gemini_with_fallback_API": "PVL Gemini with fallback Api",
     "PVL_Gemini_API_Multi": "PVL Gemini Api Multi",
+    "PVL_Gemini_with_fallback_API_Multi": "PVL Gemini with fallback Multi",
     "PVL_Txt": "PVL Txt",
     "PVL_BooleanLogic": "PVL BooleanLogic",
     "PVL_Any2String": "PVL Any To String",
@@ -186,6 +207,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Qwen_Img_Edit_Inpaint": "PVL Qwen Image Edit Inpaint (fal.ai)",
     "PVL_Qwen_Img_Edit_Plus": "PVL Qwen Image Edit Multi (fal.ai)",
     "PVL_Switch": "PVL Switch",
+    "PVL_Switch_Huge": "PVL Switch Huge",
+    "PVL_Switch_x5": "PVL Switch x5",
+    "PVL_Switch_x10": "PVL Switch x10",
+    "PVL_Switch_x15": "PVL Switch x15",
     "PVL_StringConcatX3": "PVL String Concat x3",
     "PVL_StringConcatX8": "PVL String Concat x8",
     "PVL_Padding": "PVL Padding",
@@ -194,4 +219,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Seg_Florence2_API": "PVL Seg Florence2 (fal.ai)",
     "PVL_GeminiSegmentation": "PVL Gemini 2.5 Segmentation",
     "PVL_fal_Flux2_Dev_API": "PVL Flux.2 Dev (fal.ai)",
+    "PVL_fal_Flux2_Pro_API": "PVL Flux.2 Pro (fal.ai)",
+    "PVL_fal_Flux2_Flex_API": "PVL Flux.2 Flex (fal.ai)",
+    "PVL_fal_Flux2_Camera_Ctrl_API": "PVL Flux.2 Camera Control (fal.ai)",
+    "PVL_Color_Match": "PVL Color Match",
+    "PVL_Get_Image_Size": "PVL Get Image Size",
 }

@@ -7,7 +7,7 @@
 # - Google Gemini 3 Pro Image (gemini-3-pro-image-preview) text+image generation
 # - Multi-prompt via regex delimiter
 # - Up to 8 reference images
-# - Resolution dropdown: 1K / 2K / 4K  (Gemini 3 Pro Image where supported + Nano Banana Pro via FAL)
+# - Resolution: 1K / 2K / 4K (Gemini 3 Pro Image where supported + Nano Banana Pro via FAL)
 # - Optional google_search grounding tools
 # - FAL fallback (nano-banana-pro / nano-banana-pro/edit)
 # - Parallel calls & simple retry logic for transient errors
@@ -228,8 +228,15 @@ class PVL_Google_NanoBanana_PRO_Multi_API:
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "model": ("STRING", {"default": DEFAULT_MODEL}),
-                # Dropdown for 1K / 2K / 4K
-                "resolution": (["1K", "2K", "4K"],),
+                # Resolution: 1K / 2K / 4K or "auto" to omit and use API defaults.
+                "resolution": (
+                    "STRING",
+                    {
+                        "default": "1K",
+                        "multiline": False,
+                        "placeholder": "1K, 2K, 4K or auto",
+                    },
+                ),
                 "output_format": (["png", "jpeg"], {"default": "png"}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1}),
                 "retries": ("INT", {"default": 3, "min": 0, "max": 10}),
@@ -263,7 +270,7 @@ class PVL_Google_NanoBanana_PRO_Multi_API:
                     {
                         "default": "1:1",
                         "multiline": False,
-                        "placeholder": "e.g. 1:1, 2:3, 3:2, 4:5, 16:9...",
+                        "placeholder": "e.g. 1:1, 2:3, 3:2, 4:5, 16:9 or auto",
                     },
                 ),
                 "endpoint_override": (
@@ -331,11 +338,23 @@ class PVL_Google_NanoBanana_PRO_Multi_API:
         return f"{int(m.group(1))}:{int(m.group(2))}"
 
     def _clean_resolution(self, res: T.Optional[str]) -> T.Optional[str]:
-        if not res:
+        """
+        Normalize resolution:
+        - None / ""      -> None (omit)
+        - "auto"        -> None (omit, use API default)
+        - "1K","2K","4K" -> normalized uppercase value
+        - anything else -> None (invalid)
+        """
+        if res is None:
             return None
-        s = str(res).strip().upper()
-        if s in {"1K", "2K", "4K"}:
-            return s
+        s = str(res).strip()
+        if not s:
+            return None
+        if s.lower() == "auto":
+            return None
+        u = s.upper()
+        if u in {"1K", "2K", "4K"}:
+            return u
         return None
 
     def _build_config(
@@ -797,12 +816,15 @@ class PVL_Google_NanoBanana_PRO_Multi_API:
                     "omitting from requests."
                 )
 
-        # Resolution (docs: must be 1K, 2K, 4K with uppercase K)
+        # Resolution:
+        # - "auto" or empty -> omit and let API choose defaults
+        # - "1K"/"2K"/"4K"   -> normalized and passed through
+        resolution_str = (resolution or "").strip()
         resolution_opt = self._clean_resolution(resolution)
-        if resolution and not resolution_opt:
+        if resolution_str and resolution_str.lower() != "auto" and not resolution_opt:
             print(
                 f"[PVL PRO NODE] WARNING: invalid resolution '{resolution}'. "
-                "Supported: 1K, 2K, 4K. Omitting from requests."
+                "Supported: 1K, 2K, 4K, or 'auto' to omit. Omitting from requests."
             )
 
         # Split prompts via delimiter regex
