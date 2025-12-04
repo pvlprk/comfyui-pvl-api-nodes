@@ -8,3 +8,4 @@ google-genai>=1.41.0
 diffusers>=0.35.1
 scikit-image
 color-matcher==0.5.0
+matplotlib>=3.7.0

@@ -72,6 +72,7 @@ from .pvl_fal_flux2_flex import PVL_fal_Flux2_Flex_API
 from .pvl_fal_flux2_camera_ctrl import PVL_fal_Flux2_Camera_Ctrl_API
 from .pvl_color_match import PVL_Color_Match
 from .pvl_get_image_size import PVL_Get_Image_Size
+from .pvl_text_overlay import PVL_Text_Overlay
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -148,6 +149,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_Flux2_Camera_Ctrl_API": PVL_fal_Flux2_Camera_Ctrl_API,
     "PVL_Color_Match": PVL_Color_Match,
     "PVL_Get_Image_Size": PVL_Get_Image_Size,
+    "PVL_Text_Overlay": PVL_Text_Overlay,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -224,4 +226,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_Flux2_Camera_Ctrl_API": "PVL Flux.2 Camera Control (fal.ai)",
     "PVL_Color_Match": "PVL Color Match",
     "PVL_Get_Image_Size": "PVL Get Image Size",
+    "PVL_Text_Overlay": "PVL Text Overlay",
 }
