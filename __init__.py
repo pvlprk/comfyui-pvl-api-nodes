@@ -74,6 +74,7 @@ from .pvl_color_match import PVL_Color_Match
 from .pvl_get_image_size import PVL_Get_Image_Size
 from .pvl_text_overlay import PVL_Text_Overlay
 from .pvl_fal_seedream_45 import PVL_fal_SeeDream_45_API
+from .pvl_fal_flux_dev_inpaint import PVL_fal_Flux_Dev_Inpaint_API
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -152,6 +153,7 @@ NODE_CLASS_MAPPINGS = {
     "PVL_Get_Image_Size": PVL_Get_Image_Size,
     "PVL_Text_Overlay": PVL_Text_Overlay,
     "PVL_fal_SeeDream_45_API": PVL_fal_SeeDream_45_API,
+    "PVL_fal_Flux_Dev_Inpaint_API": PVL_fal_Flux_Dev_Inpaint_API,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -230,4 +232,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_Get_Image_Size": "PVL Get Image Size",
     "PVL_Text_Overlay": "PVL Text Overlay",
     "PVL_fal_SeeDream_45_API": "PVL SeeDream 4.5 (fal.ai)",
+    "PVL_fal_Flux_Dev_Inpaint_API": "PVL Flux Dev Inpaint (fal.ai)",
 }
