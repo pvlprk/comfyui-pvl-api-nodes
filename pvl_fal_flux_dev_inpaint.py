@@ -1,6 +1,7 @@
 import re
 import time
 import io
+import base64
 import requests
 import torch
 from PIL import Image
@@ -14,11 +15,13 @@ class PVL_fal_Flux_Dev_Inpaint_API:
     PVL Flux Dev Inpaint (fal.ai)
     Endpoint: fal-ai/flux-lora/inpainting
 
-    - image input: ComfyUI IMAGE
-    - mask input: ComfyUI MASK (float 0..1, where 1.0 = inpaint area)
-    - both are uploaded to fal.storage and passed as:
-        image_url: URL
-        mask_url:  URL (black/white PNG)
+    Inputs:
+      - image: ComfyUI IMAGE
+      - mask:  ComfyUI MASK (float 0..1, where 1.0 = inpaint region)
+
+    Implementation:
+      - Uses Base64 PNG data URIs for image_url + mask_url (no fal.storage upload).
+      - Queue submit -> poll -> fetch (mirrors PVL Flux With LoRA node pattern).
     """
 
     @classmethod
@@ -53,7 +56,7 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                     {
                         "default": "[++]",
                         "multiline": False,
-                        "placeholder": "Delimiter/regex for splitting prompts (e.g., [++], \\n, |)",
+                        "placeholder": "Delimiter/regex for splitting prompts (e.g. [++], \\n, |)",
                     },
                 ),
             },
@@ -63,14 +66,13 @@ class PVL_fal_Flux_Dev_Inpaint_API:
     FUNCTION = "generate_image"
     CATEGORY = "PVL_tools_FAL"
 
-    # -------------------------
-    # Error handling (match example-node behavior)
-    # -------------------------
+    # -------- Local fallback error handler --------
     def _handle_error(self, api_name: str, error: Exception):
         print(f"[{api_name} ERROR] {str(error)}")
         blank = torch.zeros((1, 256, 256, 3), dtype=torch.float32)
         return (blank,)
 
+    # -------- Detect non-retryable policy errors --------
     def _is_content_policy_violation(self, message_or_json) -> bool:
         try:
             if isinstance(message_or_json, dict):
@@ -92,17 +94,15 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         return False
 
     # -------------------------
-    # MASK -> black/white PNG (L-mode)
+    # MASK -> strict B/W (L-mode) -> data URI
     # -------------------------
     def _mask_to_pil_bw(self, mask: torch.Tensor) -> Image.Image:
         """
-        Convert ComfyUI MASK to black/white PIL image.
-
         ComfyUI MASK:
           - shape: (H,W) or (1,H,W)
           - float in [0,1]
-          - 1.0 = inpaint area (white)
-          - 0.0 = preserve area (black)
+          - 1.0 = inpaint region (white)
+          - 0.0 = keep region (black)
         """
         if not isinstance(mask, torch.Tensor):
             raise RuntimeError("Mask must be a torch.Tensor")
@@ -116,42 +116,17 @@ class PVL_fal_Flux_Dev_Inpaint_API:
             raise RuntimeError(f"Invalid MASK shape: {tuple(mask.shape)}")
 
         m = m.clamp(0.0, 1.0)
-        m = (m * 255.0).round().to(torch.uint8)
+        m8 = (m * 255.0).round().to(torch.uint8).numpy()
+        return Image.fromarray(m8, mode="L")
 
-        return Image.fromarray(m.numpy(), mode="L")
-
-    def _upload_pil_to_fal_storage(self, pil_image: Image.Image, timeout: int = 120) -> str:
-        """
-        Upload a PIL image to fal.storage, returning a URL.
-        (Used for uploading the mask as a PNG.)
-        """
-        fal_key = FalConfig.get_api_key()
-        if not fal_key:
-            raise RuntimeError("FAL_KEY environment variable not set")
-
+    def _pil_to_png_data_uri(self, pil_img: Image.Image) -> str:
         buf = io.BytesIO()
-        pil_image.save(buf, format="PNG")
-        buf.seek(0)
-
-        resp = requests.post(
-            "https://fal.run/storage/upload",
-            headers={"Authorization": f"Key {fal_key}"},
-            files={"file": ("mask.png", buf, "image/png")},
-            timeout=timeout,
-        )
-
-        if resp.status_code != 200:
-            raise RuntimeError(f"FAL upload failed: {resp.status_code} {resp.text}")
-
-        data = resp.json()
-        url = data.get("url") or data.get("file_url") or data.get("signed_url")
-        if not url:
-            raise RuntimeError("FAL: upload returned no URL")
-
-        return url
+        pil_img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
 
     # -------------------------
-    # Queue submit/poll (example-node style with ApiHandler fallbacks)
+    # FAL queue submit/poll (matches your example node)
     # -------------------------
     def _direct_fal_submit(self, endpoint: str, arguments: dict, timeout_sec: int, debug: bool):
         fal_key = FalConfig.get_api_key()
@@ -197,8 +172,8 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         output_format,
         sync_mode,
         strength,
-        image_url,
-        mask_url,
+        image_data_uri,
+        mask_data_uri,
         timeout_sec=120,
         debug=False,
     ):
@@ -211,8 +186,8 @@ class PVL_fal_Flux_Dev_Inpaint_API:
             "output_format": output_format,
             "sync_mode": bool(sync_mode),
             "image_size": {"width": int(width), "height": int(height)},
-            "image_url": image_url,
-            "mask_url": mask_url,
+            "image_url": image_data_uri,
+            "mask_url": mask_data_uri,
             "strength": float(strength),
         }
         if seed != -1:
@@ -220,13 +195,11 @@ class PVL_fal_Flux_Dev_Inpaint_API:
 
         if debug:
             safe_args = dict(arguments)
-            if isinstance(safe_args.get("image_url"), str):
-                safe_args["image_url"] = safe_args["image_url"][:90] + "..."
-            if isinstance(safe_args.get("mask_url"), str):
-                safe_args["mask_url"] = safe_args["mask_url"][:90] + "..."
+            safe_args["image_url"] = safe_args["image_url"][:48] + "...(data-uri)"
+            safe_args["mask_url"] = safe_args["mask_url"][:48] + "...(data-uri)"
             print(f"[FAL SUBMIT] payload: {safe_args}")
 
-        # Prefer your utils if present
+        # Prefer ApiHandler if it supports async submit_only (same pattern as your other node)
         if hasattr(ApiHandler, "submit_only"):
             try:
                 if "timeout" in ApiHandler.submit_only.__code__.co_varnames:
@@ -237,7 +210,8 @@ class PVL_fal_Flux_Dev_Inpaint_API:
 
         return self._direct_fal_submit("fal-ai/flux-lora/inpainting", arguments, timeout_sec, debug)
 
-    def _poll_request(self, request_info, timeout_sec=120, debug=False):
+    def _poll_request(self, request_info, timeout_sec=120, debug=False, item_idx=None, attempt=None, started_at=None):
+        # Prefer ApiHandler if it supports async polling (same pattern as your other node)
         if hasattr(ApiHandler, "poll_and_get_result"):
             try:
                 if "timeout" in ApiHandler.poll_and_get_result.__code__.co_varnames:
@@ -253,31 +227,37 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         headers = {"Authorization": f"Key {fal_key}"}
         status_url = request_info["status_url"]
         resp_url = request_info["response_url"]
+        req_id = request_info.get("request_id", "")[:16]
 
         deadline = time.time() + timeout_sec
+        completed = False
         while time.time() < deadline:
-            sr = requests.get(status_url, headers=headers, timeout=min(10, timeout_sec))
-            if sr.ok:
-                js = sr.json()
-                st = js.get("status")
+            try:
+                sr = requests.get(status_url, headers=headers, timeout=min(10, timeout_sec))
+                if sr.ok:
+                    js = sr.json()
+                    st = js.get("status")
+                    if debug:
+                        elapsed = (time.time() - (started_at or 0.0)) if started_at else 0.0
+                        print(f"[FAL POLL] item={item_idx} attempt={attempt} req={req_id} status={st} elapsed={elapsed:.1f}s")
+                    if st == "COMPLETED":
+                        completed = True
+                        break
+                    if st == "ERROR":
+                        msg = js.get("error") or "Unknown FAL error"
+                        payload = js.get("payload")
+                        if payload:
+                            raise RuntimeError(f"FAL status ERROR: {msg} | details: {payload}")
+                        raise RuntimeError(f"FAL status ERROR: {msg}")
+            except Exception as e:
                 if debug:
-                    print(f"[FAL POLL] status={st}")
-                if st == "COMPLETED":
-                    break
-                if st == "ERROR":
-                    msg = js.get("error") or "Unknown FAL error"
-                    payload = js.get("payload")
-                    if payload:
-                        raise RuntimeError(f"FAL status ERROR: {msg} | details: {payload}")
-                    raise RuntimeError(f"FAL status ERROR: {msg}")
-            else:
-                if debug:
-                    print(f"[FAL POLL] http={sr.status_code}: {sr.text}")
+                    print(f"[FAL POLL] item={item_idx} attempt={attempt} req={req_id} status_check_error: {e}")
             time.sleep(0.6)
-        else:
-            raise RuntimeError(f"FAL request timed out after {timeout_sec}s")
 
-        rr = requests.get(resp_url, headers=headers, timeout=min(20, timeout_sec))
+        if not completed:
+            raise RuntimeError(f"FAL request {req_id} timed out after {timeout_sec}s")
+
+        rr = requests.get(resp_url, headers=headers, timeout=min(15, timeout_sec))
         if not rr.ok:
             try:
                 js = rr.json()
@@ -287,12 +267,9 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                 pass
             raise RuntimeError(f"FAL result fetch error {rr.status_code}: {rr.text}")
 
-        raw = rr.json()
-        return raw.get("response", raw)
+        return rr.json().get("response", rr.json())
 
-    # -------------------------
-    # Per-item worker with retries (matches example-node pattern)
-    # -------------------------
+    # Worker with per-item retries
     def _run_one_with_retries(
         self,
         item_index: int,
@@ -306,8 +283,8 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         output_format: str,
         sync_mode: bool,
         strength: float,
-        image_url: str,
-        mask_url: str,
+        image_data_uri: str,
+        mask_data_uri: str,
         retries: int,
         timeout_sec: int,
         debug: bool,
@@ -319,7 +296,7 @@ class PVL_fal_Flux_Dev_Inpaint_API:
             t0 = time.time()
             try:
                 if debug:
-                    print(f"[PVL Flux Dev Inpaint INFO] item={item_index} attempt={attempt}/{retries+1} seed={seed_for_item}")
+                    print(f"[FAL ITEM] item={item_index} attempt={attempt}/{retries+1} seed={seed_for_item}")
 
                 req_info = self._submit_request(
                     prompt_text=prompt_text,
@@ -332,28 +309,37 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                     output_format=output_format,
                     sync_mode=sync_mode,
                     strength=strength,
-                    image_url=image_url,
-                    mask_url=mask_url,
+                    image_data_uri=image_data_uri,
+                    mask_data_uri=mask_data_uri,
                     timeout_sec=timeout_sec,
                     debug=debug,
                 )
 
-                result = self._poll_request(req_info, timeout_sec=timeout_sec, debug=debug)
+                result = self._poll_request(
+                    req_info,
+                    timeout_sec=timeout_sec,
+                    debug=debug,
+                    item_idx=item_index,
+                    attempt=attempt,
+                    started_at=t0,
+                )
 
-                # Use your shared processor: returns (tensor_batch, urls)
-                img_tensor = ResultProcessor.process_image_result(result)[0]
+                out = ResultProcessor.process_image_result(result)
+                img_tensor = out[0] if isinstance(out, tuple) else out
+                if torch.is_tensor(img_tensor) and img_tensor.ndim == 3:
+                    img_tensor = img_tensor.unsqueeze(0)
 
                 if debug:
-                    print(f"[PVL Flux Dev Inpaint INFO] item={item_index} OK dt={time.time()-t0:.2f}s")
+                    print(f"[FAL ITEM OK] item={item_index} attempt={attempt} dt={time.time()-t0:.2f}s")
 
                 return True, img_tensor, ""
 
             except Exception as e:
                 last_err = str(e)
-                print(f"[PVL Flux Dev Inpaint ERROR] item={item_index} attempt={attempt} -> {last_err}")
+                print(f"[FAL ITEM ERROR] item={item_index} attempt={attempt} -> {last_err}")
                 if self._is_content_policy_violation(last_err):
                     if debug:
-                        print("[PVL Flux Dev Inpaint INFO] content_policy_violation detected — stopping retries.")
+                        print(f"[FAL ITEM INFO] item={item_index} content_policy_violation detected — stopping retries.")
                     break
 
         return False, None, last_err
@@ -363,10 +349,16 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         if not base_prompts:
             return []
         if len(base_prompts) >= N:
-            return base_prompts[:N]
+            call_prompts = base_prompts[:N]
+        else:
+            if debug:
+                print(f"[PVL Flux Dev Inpaint] Provided {len(base_prompts)} prompts but num_images={N}. Reusing last prompt.")
+            call_prompts = base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
         if debug:
-            print(f"[PVL Flux Dev Inpaint WARNING] Provided {len(base_prompts)} prompts but num_images={N}. Reusing last prompt.")
-        return base_prompts + [base_prompts[-1]] * (N - len(base_prompts))
+            for i, p in enumerate(call_prompts):
+                show = p if len(p) <= 160 else (p[:157] + "...")
+                print(f"[PVL Flux Dev Inpaint] Call {i+1} prompt: {show}")
+        return call_prompts
 
     # -------------------------
     # Main ComfyUI entrypoint
@@ -391,14 +383,14 @@ class PVL_fal_Flux_Dev_Inpaint_API:
         debug_log=False,
         delimiter="[++]",
     ):
-        t_start = time.time()
+        _t0 = time.time()
 
         try:
-            # Prompt splitting (regex delimiter, same behavior as your other node)
+            # Split prompts using delimiter with regex support
             try:
                 base_prompts = [p.strip() for p in re.split(delimiter, prompt) if str(p).strip()]
             except re.error:
-                print(f"[PVL Flux Dev Inpaint WARNING] Invalid regex '{delimiter}', using literal split.")
+                print(f"[PVL Flux Dev Inpaint WARNING] Invalid regex pattern '{delimiter}', using literal split.")
                 base_prompts = [p.strip() for p in str(prompt).split(delimiter) if str(p).strip()]
 
             if not base_prompts:
@@ -409,18 +401,15 @@ class PVL_fal_Flux_Dev_Inpaint_API:
 
             print(f"[PVL Flux Dev Inpaint INFO] Processing {N} call(s) | retries={retries} | timeout={timeout_sec}s")
 
-            # Upload image once via your shared util
-            image_url = ImageUtils.upload_image(image)
-
-            # Convert ComfyUI MASK -> black/white PNG and upload
+            # Build data URIs ONCE and reuse for all calls (no fal.storage upload)
+            image_data_uri = ImageUtils.image_to_data_uri(image)
             mask_pil = self._mask_to_pil_bw(mask)
-            mask_url = self._upload_pil_to_fal_storage(mask_pil, timeout=min(120, int(timeout_sec)))
+            mask_data_uri = self._pil_to_png_data_uri(mask_pil)
 
             if debug_log:
-                print(f"[PVL Flux Dev Inpaint DEBUG] image_url={image_url}")
-                print(f"[PVL Flux Dev Inpaint DEBUG] mask_url={mask_url}")
+                print("[PVL Flux Dev Inpaint DEBUG] Using image_url + mask_url as data URIs (no storage upload).")
 
-            # Single call
+            # Single call path
             if N == 1:
                 ok, img_tensor, last_err = self._run_one_with_retries(
                     item_index=0,
@@ -434,20 +423,19 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                     output_format=output_format,
                     sync_mode=sync_mode,
                     strength=strength,
-                    image_url=image_url,
-                    mask_url=mask_url,
+                    image_data_uri=image_data_uri,
+                    mask_data_uri=mask_data_uri,
                     retries=retries,
                     timeout_sec=timeout_sec,
                     debug=debug_log,
                 )
-
-                if ok and isinstance(img_tensor, torch.Tensor):
-                    print(f"[PVL Flux Dev Inpaint INFO] Successfully generated 1 image in {time.time()-t_start:.2f}s")
+                if ok and torch.is_tensor(img_tensor):
+                    _t1 = time.time()
+                    print(f"[PVL Flux Dev Inpaint INFO] Successfully generated 1 image in {(_t1 - _t0):.2f}s")
                     return (img_tensor,)
-
                 raise RuntimeError(last_err or "All attempts failed for single request")
 
-            # Parallel calls
+            # Multiple calls in parallel
             print(f"[PVL Flux Dev Inpaint INFO] Submitting {N} requests in parallel...")
 
             results_map = {}
@@ -467,18 +455,18 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                     output_format=output_format,
                     sync_mode=sync_mode,
                     strength=strength,
-                    image_url=image_url,
-                    mask_url=mask_url,
+                    image_data_uri=image_data_uri,
+                    mask_data_uri=mask_data_uri,
                     retries=retries,
                     timeout_sec=timeout_sec,
                     debug=debug_log,
                 )
 
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = [ex.submit(worker, i) for i in range(N)]
-                for fut in as_completed(futures):
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futs = [executor.submit(worker, i) for i in range(N)]
+                for fut in as_completed(futs):
                     i, ok, img_tensor, last_err = fut.result()
-                    if ok and isinstance(img_tensor, torch.Tensor):
+                    if ok and torch.is_tensor(img_tensor):
                         results_map[i] = img_tensor
                     else:
                         errors_map[i] = last_err or "Unknown error"
@@ -487,19 +475,19 @@ class PVL_fal_Flux_Dev_Inpaint_API:
                 sample_err = next(iter(errors_map.values()), "All FAL requests failed")
                 raise RuntimeError(sample_err)
 
-            ordered = [results_map[i] for i in sorted(results_map.keys())]
-            final_tensor = torch.cat(ordered, dim=0)  # (B,H,W,C)
+            all_images = [results_map[i] for i in sorted(results_map.keys()) if torch.is_tensor(results_map[i])]
+            if not all_images:
+                raise RuntimeError("No images were generated from API calls")
 
-            print(
-                f"[PVL Flux Dev Inpaint INFO] Successfully generated {final_tensor.shape[0]}/{N} images in {time.time()-t_start:.2f}s"
-            )
+            final_tensor = torch.cat(all_images, dim=0)
+
+            _t1 = time.time()
+            print(f"[PVL Flux Dev Inpaint INFO] Successfully generated {final_tensor.shape[0]}/{N} images in {(_t1 - _t0):.2f}s")
 
             failed_idxs = sorted(set(range(N)) - set(results_map.keys()))
             if failed_idxs:
                 for i in failed_idxs:
-                    print(
-                        f"[PVL Flux Dev Inpaint ERROR] Item {i+1} failed after {retries+1} attempt(s): {errors_map.get(i,'Unknown error')}"
-                    )
+                    print(f"[PVL Flux Dev Inpaint ERROR] Item {i+1} failed after {retries+1} attempt(s): {errors_map.get(i,'Unknown error')}")
                 print(f"[PVL Flux Dev Inpaint WARNING] Returning only {final_tensor.shape[0]}/{N} successful results.")
 
             if seed != -1:
