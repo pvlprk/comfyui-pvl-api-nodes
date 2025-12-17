@@ -25,7 +25,7 @@ class PVL_fal_Flux2_Pro_API:
                         "1:1",          # square_hd
                         "3:4",          # portrait_4_3
                         "9:16",         # portrait_16_9
-                        "4:3",          # landscape_4_3
+                        # "4:3",          # landscape_4_3
                         "16:9",         # landscape_16_9
                         "auto",         # only used for edit endpoint
                         "custom",       # uses width/height below
@@ -41,7 +41,7 @@ class PVL_fal_Flux2_Pro_API:
                 "output_format": (["jpg", "png"], {"default": "png"}),
                 # Retry + timeout + debug controls
                 "retries": ("INT", {"default": 2, "min": 0, "max": 10}),
-                "timeout_sec": ("INT", {"default": 30, "min": 5, "max": 600, "step": 5}),
+                "timeout_sec": ("INT", {"default": 120, "min": 5, "max": 600, "step": 5}),
                 "debug_log": ("BOOLEAN", {"default": False}),
             },
             "optional": {
@@ -146,6 +146,7 @@ class PVL_fal_Flux2_Pro_API:
         prompt_text: str,
         image_size,
         seed: int,
+        num_images: int,
         safety_tolerance: int,
         enable_safety_checker: bool,
         output_format: str,
@@ -169,6 +170,7 @@ class PVL_fal_Flux2_Pro_API:
 
         arguments = {
             "prompt": prompt_text,
+            "num_images": int(max(1, num_images)),
             "image_size": img_size_payload,
             "safety_tolerance": str(int(safety_tolerance)),
             "enable_safety_checker": bool(enable_safety_checker),
@@ -337,6 +339,7 @@ class PVL_fal_Flux2_Pro_API:
         prompt_text: str,
         image_size,
         seed_base: int,
+        num_images: int,
         safety_tolerance: int,
         enable_safety_checker: bool,
         output_format: str,
@@ -369,6 +372,7 @@ class PVL_fal_Flux2_Pro_API:
                     prompt_text,
                     image_size,
                     seed_for_item,
+                    num_images,
                     safety_tolerance,
                     enable_safety_checker,
                     output_format,
@@ -421,71 +425,18 @@ class PVL_fal_Flux2_Pro_API:
 
     def _collect_image_urls(self, images, debug=False):
         """
-        Convert connected image tensors to URLs for FAL.
+        Convert connected image tensors to data URIs (base64 PNG) for FAL.
 
-        Preferred path:
-            - Use fal_client.upload_file(...) to upload each image as PNG to fal.media.
-        Fallback path:
-            - If fal_client is not available or upload fails, fall back to Base64 PNG
-              data URIs via ImageUtils.image_to_data_uri.
-
-        IMPORTANT:
+        NOTE:
+            - This intentionally uses base64 submission for reliability/portability.
             - No truncation: all connected images are used.
         """
         urls = []
-
-        fal_client = None
-        try:
-            import fal_client as _fal_client  # type: ignore
-            fal_client = _fal_client
-            if debug:
-                print("[FAL IMAGE] fal_client found; images will be uploaded to fal.media as URLs.")
-        except Exception as e:
-            if debug:
-                print(f"[FAL IMAGE WARN] fal_client not available ({e}); falling back to data URIs.")
-
         for idx, img in enumerate(images):
             if img is None:
                 continue
             if not isinstance(img, torch.Tensor):
                 continue
-
-            if fal_client is not None:
-                # Preferred: upload to fal.media
-                try:
-                    tensor = img
-                    if tensor.ndim == 4:
-                        tensor = tensor[0]
-                    tensor = tensor.detach().cpu().clamp(0.0, 1.0)
-
-                    # Convert to uint8 HWC for PIL
-                    arr = (tensor.numpy() * 255.0).round().astype("uint8")
-                    pil_img = Image.fromarray(arr)
-
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        tmp_path = tmp.name
-                        pil_img.save(tmp, format="PNG")
-
-                    try:
-                        url = fal_client.upload_file(tmp_path)
-                    finally:
-                        try:
-                            os.remove(tmp_path)
-                        except Exception:
-                            pass
-
-                    urls.append(url)
-                    if debug:
-                        print(f"[FAL IMAGE] uploaded image input at slot {idx + 1} -> {url}")
-                    continue
-                except Exception as e:
-                    print(
-                        f"[FAL IMAGE UPLOAD ERROR] image_{idx + 1}: {e} "
-                        f"— falling back to data URI for this image."
-                    )
-                    # fall through to data-URI path
-
-            # Fallback: data URI
             try:
                 data_uri = ImageUtils.image_to_data_uri(img)
                 urls.append(data_uri)
@@ -496,8 +447,6 @@ class PVL_fal_Flux2_Pro_API:
 
         if debug:
             print(f"[FAL IMAGE] total image URLs for request: {len(urls)}")
-
-        # No truncation anymore — all connected images are used.
         return urls
 
     def _select_endpoint(self, has_image: bool):
@@ -524,7 +473,7 @@ class PVL_fal_Flux2_Pro_API:
         num_images,
         output_format,
         retries=2,
-        timeout_sec=30,
+        timeout_sec=120,
         debug_log=False,
         delimiter="[++]",
         image_1=None,
@@ -608,6 +557,7 @@ class PVL_fal_Flux2_Pro_API:
                     prompt_text=call_prompts[0],
                     image_size=image_size_payload,
                     seed_base=seed,
+                    num_images=num_images,
                     safety_tolerance=safety_tolerance,
                     enable_safety_checker=enable_safety_checker,
                     output_format=output_format,
@@ -644,6 +594,7 @@ class PVL_fal_Flux2_Pro_API:
                     prompt_text=ptxt,
                     image_size=image_size_payload,
                     seed_base=seed,
+                    num_images=num_images,
                     safety_tolerance=safety_tolerance,
                     enable_safety_checker=enable_safety_checker,
                     output_format=output_format,
@@ -709,12 +660,3 @@ class PVL_fal_Flux2_Pro_API:
         except Exception as e:
             print(f"Error generating image with FLUX.2 Pro: {str(e)}")
             return self._handle_error("FLUX.2 Pro", e)
-
-
-NODE_CLASS_MAPPINGS = {
-    "PVL_fal_Flux2_Pro_API": PVL_fal_Flux2_Pro_API,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "PVL_fal_Flux2_Pro_API": "PVL Flux.2 Pro (fal.ai)",
-}
