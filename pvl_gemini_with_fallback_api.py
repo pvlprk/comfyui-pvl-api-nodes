@@ -23,10 +23,11 @@ FALLBACK_VER = "v1"
 OPENAI_BASE = "https://api.openai.com/v1"
 
 HARDCODED_MODELS = [
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
 ]
 
 OPENAI_MODEL_CHOICES = [
@@ -404,11 +405,29 @@ def _run_openai_for_indices(
 # -----------------------------
 def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
                    pil_img: Optional[Image.Image], timeout: int, temperature: float,
-                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+                   top_p: float, top_k: int, thinking_level: str, debug: bool) -> Tuple[bool, str]:
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_img=pil_img)
 
     gen_cfg: Dict[str, Any] = {"temperature": float(temperature)}
+
+    # --- Thinking config (Gemini 3 only) ---
+    # UI: off/minimal/low/medium/high
+    # Rules:
+    # - Gemini 2.5: do NOT send thinking fields
+    # - Gemini 3 Pro: minimal/low -> low ; medium/high -> high
+    # - Gemini 3 Flash: pass through selected level
+    model_l = (model or "").lower().strip()
+    lvl = (thinking_level or "off").lower().strip()
+    if model_l.startswith("gemini-3-") and lvl != "off":
+        thinking_level_api = None
+        if model_l.startswith("gemini-3-pro"):
+            thinking_level_api = "low" if lvl in ("minimal", "low") else "high"
+        elif model_l.startswith("gemini-3-flash"):
+            thinking_level_api = lvl if lvl in ("minimal", "low", "medium", "high") else "low"
+        if thinking_level_api:
+            gen_cfg.setdefault("thinkingConfig", {})
+            gen_cfg["thinkingConfig"]["thinkingLevel"] = thinking_level_api
     if isinstance(top_p, (int, float)) and top_p > 0:
         gen_cfg["topP"] = float(top_p)
     if isinstance(top_k, int) and top_k > 0:
@@ -475,6 +494,7 @@ class PVL_Gemini_with_fallback_API:
         return {
             "required": {
                 "model": (HARDCODED_MODELS, {"default": default_model}),
+                "thinking_level": (["off","minimal","low","medium","high"], {"default": "off"}),
                 "tries": ("INT",   {"default": 2,  "min": 1,   "max": 10,  "step": 1}),
                 "timeout": ("INT", {"default": 45, "min": 1,   "max": 600, "step": 5}),
                 "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
@@ -504,7 +524,7 @@ class PVL_Gemini_with_fallback_API:
     FUNCTION = "run"
     CATEGORY = "PVL/LLM"
 
-    def run(self, model: str, tries: int, timeout: int, temperature: float,
+    def run(self, model: str, thinking_level: str, tries: int, timeout: int, temperature: float,
             top_p: float, top_k: int, batch: int, delimiter: str,
             append_variation_tag: bool, debug: bool,
             instructions: Optional[str] = "", prompt: Optional[str] = "",
@@ -594,6 +614,7 @@ class PVL_Gemini_with_fallback_API:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=top_k,
+                    thinking_level=thinking_level,
                     debug=debug,
                 )
                 return (idx, ok, out_or_err)

@@ -24,10 +24,17 @@ FALLBACK_VER = "v1"
 OPENAI_BASE = "https://api.openai.com/v1"
 
 HARDCODED_MODELS = [
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+]
+
+THINKING_LEVEL_CHOICES = [
+    "off", "minimal", "low", "medium", "high",
+    # legacy numeric values (some old workflows may have saved these)
+    "0", "1", "2", "3", "4",
 ]
 
 OPENAI_MODEL_CHOICES = [
@@ -88,6 +95,90 @@ def _b64_from_pil(pil_img: Image.Image, mime: str = "image/png") -> str:
     pil_img.save(buf, format="PNG" if mime == "image/png" else "JPEG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+
+# -----------------------------
+# Parsing + Gemini 3 thinking config helpers
+# -----------------------------
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(v)))
+
+def _clamp_float(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(v)))
+
+def _parse_int(value: Any, default: int, allow_off: bool = False) -> int:
+    if value is None:
+        return default
+    if allow_off and isinstance(value, str) and value.strip().lower() == "off":
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+def _parse_float(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+def _normalize_thinking_level(ui_val: Any) -> str:
+    # Accept legacy ints saved in some graphs: 0..4
+    if ui_val is None:
+        return "off"
+    if isinstance(ui_val, (int, float)):
+        ui_val = str(int(ui_val))
+    s = str(ui_val).strip().lower()
+    if s in ("0", "off"):
+        return "off"
+    if s in ("1", "minimal"):
+        return "minimal"
+    if s in ("2", "low"):
+        return "low"
+    if s in ("3", "medium"):
+        return "medium"
+    if s in ("4", "high"):
+        return "high"
+    return "off"
+
+def _apply_gemini3_thinking(gen_cfg: Dict[str, Any], model: str, thinking_level_ui: Any) -> None:
+    """Apply your requested mapping rules. Mutates gen_cfg in-place."""
+    m = (model or "").lower().strip()
+    lvl = _normalize_thinking_level(thinking_level_ui)
+
+    # For 2.5 models: do not send any thinking fields
+    if m.startswith("gemini-2.5-"):
+        gen_cfg.pop("thinkingConfig", None)
+        return
+
+    # Only Gemini 3 models should receive thinkingConfig
+    if not m.startswith("gemini-3-"):
+        gen_cfg.pop("thinkingConfig", None)
+        return
+
+    if lvl == "off":
+        gen_cfg.pop("thinkingConfig", None)
+        return
+
+    # Gemini 3 Pro: minimal/low -> low ; medium/high -> high
+    if m.startswith("gemini-3-pro"):
+        api_level = "low" if lvl in ("minimal", "low") else "high"
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": api_level}
+        return
+
+    # Gemini 3 Flash: pass through actual selected level
+    if m.startswith("gemini-3-flash"):
+        # gemini-3-flash supports minimal/low/medium/high in docs; enforce
+        api_level = lvl if lvl in ("minimal", "low", "medium", "high") else "low"
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": api_level}
+        return
+
+    # Unknown Gemini 3 variant: safest is do not send
+    gen_cfg.pop("thinkingConfig", None)
 
 # ---- multi-image contents builder ----
 def _build_contents(prompt: Optional[str], pil_imgs: List[Optional[Image.Image]]) -> list:
@@ -407,7 +498,7 @@ def _run_openai_for_indices(
 # -----------------------------
 def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt: Optional[str],
                    pil_imgs: List[Optional[Image.Image]], timeout: int, temperature: float,
-                   top_p: float, top_k: int, debug: bool) -> Tuple[bool, str]:
+                   top_p: float, top_k: int, thinking_level: Any, debug: bool) -> Tuple[bool, str]:
     sys_instr = {"parts": [{"text": instructions.strip()}]} if (instructions and instructions.strip()) else None
     contents = _build_contents(prompt=prompt, pil_imgs=pil_imgs)
 
@@ -416,6 +507,9 @@ def _generate_once(api_key: str, model: str, instructions: Optional[str], prompt
         gen_cfg["topP"] = float(top_p)
     if isinstance(top_k, int) and top_k > 0:
         gen_cfg["topK"] = int(top_k)
+
+    # Gemini 3 thinking config (per-node UI)
+    _apply_gemini3_thinking(gen_cfg, model, thinking_level)
     base_payload: Dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
 
     def try_one_endpoint(api_ver: str, sys_key: str) -> Tuple[bool, str, Optional[int]]:
@@ -478,11 +572,12 @@ class PVL_Gemini_with_fallback_API_Multi:
         return {
             "required": {
                 "model": (HARDCODED_MODELS, {"default": default_model}),
-                "tries": ("INT",   {"default": 2,  "min": 1,   "max": 10,  "step": 1}),
-                "timeout": ("INT", {"default": 45, "min": 1,   "max": 600, "step": 5}),
+                "tries": ("INT",   {"default": 2,  "min": 1,   "max": 100,  "step": 1}),
+                "timeout": ("INT", {"default": 45, "min": 0,   "max": 600, "step": 5}),
                 "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "top_k": ("INT", {"default": 65, "min": 1, "max": 1000, "step": 1}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "top_k": ("STRING", {"default": "65"}),
+                "thinking_level": (THINKING_LEVEL_CHOICES, {"default": "off"}),
                 "batch": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
                 "delimiter": ("STRING", {"default": "[++]"}),
                 "append_variation_tag": ("BOOLEAN", {"default": False}),
@@ -513,7 +608,7 @@ class PVL_Gemini_with_fallback_API_Multi:
     CATEGORY = "PVL/LLM"
 
     def run(self, model: str, tries: int, timeout: int, temperature: float,
-            top_p: float, top_k: int, batch: int, delimiter: str,
+            top_p: float, top_k: Any, thinking_level: Any, batch: int, delimiter: str,
             append_variation_tag: bool, debug: bool,
             instructions: Optional[str] = "", prompt: Optional[str] = "",
             seed: int = 0,
@@ -525,6 +620,16 @@ class PVL_Gemini_with_fallback_API_Multi:
 
         start_time = time.time()
         key = _get_api_key(api_key)
+
+        # --- defensive parsing/clamping (prevents old workflows with out-of-range values from crashing) ---
+        tries = _clamp_int(_parse_int(tries, 2), 1, 10)
+        timeout = _clamp_int(_parse_int(timeout, 45), 1, 600)
+        temperature = _clamp_float(_parse_float(temperature, 1.0), 0.0, 2.0)
+        # top_p is allowed to come in out of range; clamp to [0, 1]
+        top_p = _clamp_float(_parse_float(top_p, 0.95), 0.0, 1.0)
+        # top_k may be "off" from some graphs; 0 means disabled
+        top_k = _clamp_int(_parse_int(top_k, 65, allow_off=True), 0, 1000)
+        # thinking_level may be saved as int/string; normalize later in _apply_gemini3_thinking
 
         # collect and compact provided images
         imgs_raw = [image1, image2, image3, image4, image5, image6]
@@ -603,6 +708,7 @@ class PVL_Gemini_with_fallback_API_Multi:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=top_k,
+                    thinking_level=thinking_level,
                     debug=debug,
                 )
                 return (idx, ok, out_or_err)
