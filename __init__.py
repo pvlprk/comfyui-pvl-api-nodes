@@ -77,6 +77,9 @@ from .pvl_fal_seedream_45 import PVL_fal_SeeDream_45_API
 from .pvl_fal_flux_dev_inpaint import PVL_fal_Flux_Dev_Inpaint_API
 from .pvl_img_batch_utils import PVL_ImageListToImageBatch
 from .pvl_img_batch_utils import PVL_ImageBatchToImageList
+from .pvl_fal_sam3_segment import PVL_fal_Sam3_Segmentation_API
+from .pvl_fal_moondream3_segment import PVL_fal_Moondream3_Segment_API
+from .pvl_crop_to_mask import PVL_CropToMask
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -158,7 +161,9 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_Flux_Dev_Inpaint_API": PVL_fal_Flux_Dev_Inpaint_API,
     "PVL_ImageListToImageBatch": PVL_ImageListToImageBatch,
     "PVL_ImageBatchToImageList": PVL_ImageBatchToImageList,
-
+    "PVL_fal_Sam3_Segmentation_API": PVL_fal_Sam3_Segmentation_API,
+    "PVL_fal_Moondream3_Segment_API": PVL_fal_Moondream3_Segment_API,
+    "PVL_CropToMask": PVL_CropToMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -240,4 +245,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_Flux_Dev_Inpaint_API": "PVL Flux Dev Inpaint (fal.ai)",
     "PVL_ImageListToImageBatch": "PVL Image List to Image Batch",
     "PVL_ImageBatchToImageList": "PVL Image Batch to Image List",
+    "PVL_fal_Sam3_Segmentation_API": "PVL Sam3 Segmentation (fal.ai)",
+    "PVL_fal_Moondream3_Segment_API": "PVL Moondream3 Segmentation (fal.ai)",
+    "PVL_CropToMask": "PVL Crop To Mask",
 }
