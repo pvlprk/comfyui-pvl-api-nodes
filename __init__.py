@@ -80,6 +80,8 @@ from .pvl_img_batch_utils import PVL_ImageBatchToImageList
 from .pvl_fal_sam3_segment import PVL_fal_Sam3_Segmentation_API
 from .pvl_fal_moondream3_segment import PVL_fal_Moondream3_Segment_API
 from .pvl_crop_to_mask import PVL_CropToMask
+from .pvl_string_utils import PVL_StringListToString
+from .pvl_string_utils import PVL_StringToStringList
 
 NODE_CLASS_MAPPINGS = {
     "PVL Call OpenAI Assistant": CallAssistantNode,
@@ -164,6 +166,8 @@ NODE_CLASS_MAPPINGS = {
     "PVL_fal_Sam3_Segmentation_API": PVL_fal_Sam3_Segmentation_API,
     "PVL_fal_Moondream3_Segment_API": PVL_fal_Moondream3_Segment_API,
     "PVL_CropToMask": PVL_CropToMask,
+    "PVL_StringListToString": PVL_StringListToString,
+    "PVL_StringToStringList": PVL_StringToStringList,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -248,4 +252,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PVL_fal_Sam3_Segmentation_API": "PVL Sam3 Segmentation (fal.ai)",
     "PVL_fal_Moondream3_Segment_API": "PVL Moondream3 Segmentation (fal.ai)",
     "PVL_CropToMask": "PVL Crop To Mask",
+    "PVL_StringListToString": "PVL String List To String",
+    "PVL_StringToStringList": "PVL String To String List",
 }
